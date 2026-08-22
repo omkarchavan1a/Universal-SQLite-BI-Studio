@@ -1,0 +1,6 @@
+{
+  "name": "Universal Data Profiler, SQLite & Multi-Theme Showcase Dashboard",
+  "description": "Universal dataset schema profiler, in-browser SQLite database engine, multi-theme visual showcase (Berry Noir, Obsidian Gold, Cyber Neon, Sage, Slate, Arctic), real-time Excel synchronizer, dynamic KPI tracker, and analytical charts.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
