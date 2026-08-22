@@ -90,10 +90,34 @@ export default function App() {
     const params = new URLSearchParams(window.location.search);
     const themeParam = params.get('theme') as ThemeId;
     if (themeParam && THEMES[themeParam]) return themeParam;
+    
+    try {
+      const savedTheme = localStorage.getItem('universal_studio_theme') as ThemeId;
+      if (savedTheme && THEMES[savedTheme]) return savedTheme;
+    } catch {
+      // Ignore localStorage access errors
+    }
     return 'berry_noir';
   });
   const [isThemeModalOpen, setIsThemeModalOpen] = useState<boolean>(false);
   const theme = useMemo(() => getTheme(currentThemeId), [currentThemeId]);
+
+  // Persist theme changes across refreshes via localStorage & URL sync
+  useEffect(() => {
+    try {
+      localStorage.setItem('universal_studio_theme', currentThemeId);
+    } catch {
+      // Ignore storage errors in sandboxed iframes
+    }
+
+    if (typeof window !== 'undefined') {
+      const currentUrl = new URL(window.location.href);
+      if (currentUrl.searchParams.get('theme') !== currentThemeId) {
+        currentUrl.searchParams.set('theme', currentThemeId);
+        window.history.replaceState({}, '', currentUrl.toString());
+      }
+    }
+  }, [currentThemeId]);
 
   // SQLite Database State
   const [sqliteState, setSqliteState] = useState<SqliteState | null>(null);

@@ -1,14 +1,17 @@
 import React from 'react';
-import { motion, AnimatePresence } from 'motion/react';
+import { motion } from 'motion/react';
 import { 
   DollarSign, 
   Users, 
   TrendingUp, 
+  TrendingDown,
   Layers,
   Award,
   Activity,
   ArrowUpRight,
   ArrowDownRight,
+  ArrowUp,
+  ArrowDown,
   Clock,
   Sparkles,
   Zap
@@ -95,8 +98,27 @@ export const KPIGrid: React.FC<KPIGridProps> = ({
     }
   });
 
+  const groupCount = Math.max(1, Object.keys(dimFrequency).length);
   const primaryAvg = filteredCount > 0 ? primarySum / filteredCount : 0;
   const secondaryAvg = filteredCount > 0 ? secondarySum / filteredCount : 0;
+
+  // Compare averages against dataset baseline profile averages
+  const primaryBaselineAvg = primaryMetricCol?.average ?? (safeRecords.length > 0 ? primarySum / safeRecords.length : primaryAvg);
+  const primaryDiffPct = primaryBaselineAvg !== 0 
+    ? ((primaryAvg - primaryBaselineAvg) / Math.abs(primaryBaselineAvg)) * 100 
+    : 0;
+
+  const secondaryBaselineAvg = secondaryMetricCol?.average ?? (safeRecords.length > 0 ? secondarySum / safeRecords.length : secondaryAvg);
+  const secondaryDiffPct = secondaryBaselineAvg !== 0 
+    ? ((secondaryAvg - secondaryBaselineAvg) / Math.abs(secondaryBaselineAvg)) * 100 
+    : 0;
+
+  // Record volume pacing compared to average records per group
+  const currentRecordsPerGroup = filteredCount / groupCount;
+  const baselineRecordsPerGroup = totalCount / Math.max(1, primaryDimCol?.uniqueCount || groupCount);
+  const recordsDiffPct = baselineRecordsPerGroup > 0 
+    ? ((currentRecordsPerGroup - baselineRecordsPerGroup) / baselineRecordsPerGroup) * 100 
+    : (totalCount > 0 ? ((filteredCount - totalCount) / totalCount) * 100 : 0);
 
   // Find top category
   let topCategory = { name: '—', count: 0, metricSum: 0 };
@@ -105,6 +127,13 @@ export const KPIGrid: React.FC<KPIGridProps> = ({
       topCategory = { name, count: data.count, metricSum: data.metricSum };
     }
   });
+
+  // Top category compared to average category volume
+  const avgCategoryMetric = groupCount > 0 ? primarySum / groupCount : topCategory.metricSum;
+  const avgCategoryCount = groupCount > 0 ? filteredCount / groupCount : topCategory.count;
+  const topLeaderDiffPct = avgCategoryMetric > 0 
+    ? ((topCategory.metricSum - avgCategoryMetric) / avgCategoryMetric) * 100 
+    : (avgCategoryCount > 0 ? ((topCategory.count - avgCategoryCount) / avgCategoryCount) * 100 : 0);
 
   // Archetype-specific card styling
   const isCyber = theme.id === 'cyber_neon';
@@ -121,6 +150,46 @@ export const KPIGrid: React.FC<KPIGridProps> = ({
       { border: '1px solid #EF4444', boxShadow: '0 0 16px -2px rgba(239, 68, 68, 0.25)' },
     ];
     return borders[index % borders.length];
+  };
+
+  // Helper renderer for trend badge next to KPI values
+  const renderTrendBadge = (diffPct: number, baselineLabel = 'vs avg') => {
+    const isUp = diffPct >= 0;
+    const isNeutral = Math.abs(diffPct) < 0.05;
+    const absVal = Math.abs(diffPct).toFixed(1);
+
+    if (isNeutral) {
+      return (
+        <span
+          className="inline-flex items-center space-x-0.5 px-1.5 py-0.5 rounded-md text-[10px] font-bold font-mono border"
+          style={{
+            backgroundColor: theme.bgBadge,
+            color: theme.textSecondary,
+            borderColor: theme.borderSubtle,
+          }}
+          title="Value is on par with baseline average"
+        >
+          <span>~0.0%</span>
+        </span>
+      );
+    }
+
+    return (
+      <span
+        className="inline-flex items-center space-x-0.5 px-1.5 py-0.5 rounded-md text-[10px] font-bold font-mono border transition-transform"
+        style={{
+          backgroundColor: isUp 
+            ? (isCyber ? 'rgba(16, 185, 129, 0.16)' : 'rgba(16, 185, 129, 0.12)') 
+            : (isCyber ? 'rgba(239, 68, 68, 0.16)' : 'rgba(244, 63, 94, 0.12)'),
+          color: isUp ? '#10B981' : '#F43F5E',
+          borderColor: isUp ? 'rgba(16, 185, 129, 0.3)' : 'rgba(244, 63, 94, 0.3)',
+        }}
+        title={`${isUp ? 'Above' : 'Below'} average by ${absVal}% (${baselineLabel})`}
+      >
+        {isUp ? <ArrowUp className="w-2.5 h-2.5 shrink-0 stroke-[2.5]" /> : <ArrowDown className="w-2.5 h-2.5 shrink-0 stroke-[2.5]" />}
+        <span>{isUp ? '+' : '-'}{absVal}%</span>
+      </span>
+    );
   };
 
   // Unique trigger key for entrance animations on dataset change or filter modification
@@ -163,10 +232,13 @@ export const KPIGrid: React.FC<KPIGridProps> = ({
             </div>
           </div>
 
-          <div className="mt-2.5 flex items-baseline justify-between">
-            <span className="text-2xl sm:text-3xl font-bold tracking-tight font-mono" style={{ color: theme.textPrimary }}>
-              {filteredCount.toLocaleString()}
-            </span>
+          <div className="mt-2.5 flex items-baseline justify-between gap-1.5 flex-wrap">
+            <div className="flex items-center space-x-1.5">
+              <span className="text-2xl sm:text-3xl font-bold tracking-tight font-mono" style={{ color: theme.textPrimary }}>
+                {filteredCount.toLocaleString()}
+              </span>
+              {renderTrendBadge(recordsDiffPct, 'vs group avg')}
+            </div>
             <span
               className="text-[11px] font-semibold px-2 py-0.5 rounded-full flex items-center space-x-0.5"
               style={{
@@ -198,7 +270,7 @@ export const KPIGrid: React.FC<KPIGridProps> = ({
           className="mt-3 pt-2.5 border-t flex items-center justify-between text-xs font-mono"
           style={{ borderColor: theme.borderSubtle, color: theme.textSecondary }}
         >
-          <span>Attributes: <strong style={{ color: theme.textPrimary }}>{profile.columnCount} cols</strong></span>
+          <span>Avg/Grp: <strong style={{ color: theme.textPrimary }}>{currentRecordsPerGroup.toFixed(0)} rows</strong></span>
           <span>Groups: <strong style={{ color: isCyber ? '#10B981' : theme.accentPrimary }}>{Object.keys(dimFrequency).length}</strong></span>
         </div>
       </motion.div>
@@ -232,19 +304,25 @@ export const KPIGrid: React.FC<KPIGridProps> = ({
             </div>
           </div>
 
-          <div className="mt-2.5 flex items-baseline justify-between">
-            <span className="text-2xl sm:text-3xl font-bold tracking-tight font-mono" style={{ color: isCyber ? '#06B6D4' : theme.textPrimary }}>
-              {primaryMetricCol ? formatMetricValue(primarySum, primaryMetricCol.isCurrency, primaryMetricCol.isPercentage) : '—'}
-            </span>
+          <div className="mt-2.5 flex items-baseline justify-between gap-1.5 flex-wrap">
+            <div className="flex items-center space-x-1.5">
+              <span className="text-2xl sm:text-3xl font-bold tracking-tight font-mono" style={{ color: isCyber ? '#06B6D4' : theme.textPrimary }}>
+                {primaryMetricCol ? formatMetricValue(primarySum, primaryMetricCol.isCurrency, primaryMetricCol.isPercentage) : '—'}
+              </span>
+              {primaryMetricCol && renderTrendBadge(primaryDiffPct, 'vs mean')}
+            </div>
             {isRealtimeActive ? (
               <span className="text-[10px] font-bold px-2 py-0.5 rounded-full flex items-center" style={{ background: theme.bgBadge, color: theme.accentPrimary }}>
                 <span className="w-1.5 h-1.5 rounded-full mr-1 animate-ping" style={{ backgroundColor: theme.accentPrimary }} />
                 LIVE
               </span>
             ) : (
-              <span className="text-[11px] font-semibold flex items-center space-x-0.5" style={{ color: isCyber ? '#06B6D4' : theme.accentPrimary }}>
-                <ArrowUpRight className="w-3 h-3" />
-                <span>+12.5%</span>
+              <span 
+                className="text-[11px] font-semibold flex items-center space-x-0.5" 
+                style={{ color: primaryDiffPct >= 0 ? (isCyber ? '#06B6D4' : theme.accentPrimary) : '#F43F5E' }}
+              >
+                {primaryDiffPct >= 0 ? <ArrowUpRight className="w-3 h-3" /> : <ArrowDownRight className="w-3 h-3" />}
+                <span>{primaryDiffPct >= 0 ? '+' : ''}{primaryDiffPct.toFixed(1)}%</span>
               </span>
             )}
           </div>
@@ -304,10 +382,13 @@ export const KPIGrid: React.FC<KPIGridProps> = ({
             </div>
           </div>
 
-          <div className="mt-2.5 flex items-baseline justify-between">
-            <span className="text-2xl sm:text-3xl font-bold tracking-tight font-mono" style={{ color: isCyber ? '#F59E0B' : theme.textPrimary }}>
-              {secondaryMetricCol ? formatMetricValue(secondarySum, secondaryMetricCol.isCurrency, secondaryMetricCol.isPercentage) : '—'}
-            </span>
+          <div className="mt-2.5 flex items-baseline justify-between gap-1.5 flex-wrap">
+            <div className="flex items-center space-x-1.5">
+              <span className="text-2xl sm:text-3xl font-bold tracking-tight font-mono" style={{ color: isCyber ? '#F59E0B' : theme.textPrimary }}>
+                {secondaryMetricCol ? formatMetricValue(secondarySum, secondaryMetricCol.isCurrency, secondaryMetricCol.isPercentage) : '—'}
+              </span>
+              {secondaryMetricCol && renderTrendBadge(secondaryDiffPct, 'vs mean')}
+            </div>
             {secondaryMetricCol && primarySum > 0 && (
               <span className="text-[11px] font-mono font-bold px-2 py-0.5 rounded-full" style={{ background: theme.bgBadge, color: isCyber ? '#F59E0B' : theme.accentSecondary }}>
                 {((secondarySum / primarySum) * 100).toFixed(1)}% of prim
@@ -370,10 +451,13 @@ export const KPIGrid: React.FC<KPIGridProps> = ({
             </div>
           </div>
 
-          <div className="mt-2.5 flex items-baseline justify-between">
-            <span className="text-lg sm:text-xl font-bold tracking-tight truncate max-w-[170px]" style={{ color: theme.textPrimary }} title={topCategory.name}>
-              {topCategory.name}
-            </span>
+          <div className="mt-2.5 flex items-baseline justify-between gap-1.5 flex-wrap">
+            <div className="flex items-center space-x-1.5">
+              <span className="text-lg sm:text-xl font-bold tracking-tight truncate max-w-[160px]" style={{ color: theme.textPrimary }} title={topCategory.name}>
+                {topCategory.name}
+              </span>
+              {renderTrendBadge(topLeaderDiffPct, 'vs category avg')}
+            </div>
             <span className="inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-bold font-mono" style={{ background: theme.bgBadge, color: isCyber ? '#EF4444' : theme.accentPrimary }}>
               {topCategory.count} items
             </span>
