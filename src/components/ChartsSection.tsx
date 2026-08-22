@@ -1,4 +1,5 @@
 import React, { useState, useMemo, useEffect } from 'react';
+import { motion, AnimatePresence } from 'motion/react';
 import {
   BarChart,
   Bar,
@@ -38,6 +39,31 @@ interface ChartsSectionProps {
   records?: GenericRecord[];
   theme?: ThemeConfig;
 }
+
+const chartsContainerVariants = {
+  hidden: { opacity: 0 },
+  visible: {
+    opacity: 1,
+    transition: {
+      staggerChildren: 0.1,
+      delayChildren: 0.05,
+    },
+  },
+};
+
+const chartCardVariants = {
+  hidden: { opacity: 0, y: 22, scale: 0.98 },
+  visible: {
+    opacity: 1,
+    y: 0,
+    scale: 1,
+    transition: {
+      type: 'spring',
+      stiffness: 260,
+      damping: 24,
+    },
+  },
+};
 
 export const ChartsSection: React.FC<ChartsSectionProps> = ({
   profile,
@@ -385,12 +411,20 @@ export const ChartsSection: React.FC<ChartsSectionProps> = ({
       </div>
 
       {/* Visualizations Grid */}
-      <div className={`grid gap-4 ${activeTab === 'all' ? 'grid-cols-1 lg:grid-cols-2' : 'grid-cols-1'}`}>
+      <motion.div
+        key={`${profile?.name || 'dataset'}-${safeRecords.length}-${activeTab}-${selectedDimension}-${selectedMetric1}`}
+        variants={chartsContainerVariants}
+        initial="hidden"
+        animate="visible"
+        className={`grid gap-4 ${activeTab === 'all' ? 'grid-cols-1 lg:grid-cols-2' : 'grid-cols-1'}`}
+      >
         
-        {/* 1. Curve / Area Timeline Trend (Archetype from Image 1, 2, 3) */}
+        {/* 1. Curve / Area Timeline Trend */}
         {(activeTab === 'all' || activeTab === 'line') && (
-          <div
+          <motion.div
             id="chart-container-line"
+            variants={chartCardVariants}
+            whileHover={{ y: -2, transition: { duration: 0.2 } }}
             className="rounded-2xl p-4.5 border transition-all duration-300 shadow-sm"
             style={{
               backgroundColor: theme.bgCard,
@@ -469,13 +503,15 @@ export const ChartsSection: React.FC<ChartsSectionProps> = ({
                 </AreaChart>
               </ResponsiveContainer>
             </div>
-          </div>
+          </motion.div>
         )}
 
-        {/* 2. Donut & Proportion Breakdown (Archetype from Image 1 & 3) */}
+        {/* 2. Donut & Proportion Breakdown */}
         {(activeTab === 'all' || activeTab === 'pie') && (
-          <div
+          <motion.div
             id="chart-container-pie"
+            variants={chartCardVariants}
+            whileHover={{ y: -2, transition: { duration: 0.2 } }}
             className="rounded-2xl p-4.5 border transition-all duration-300 shadow-sm flex flex-col justify-between"
             style={{
               backgroundColor: theme.bgCard,
@@ -536,7 +572,7 @@ export const ChartsSection: React.FC<ChartsSectionProps> = ({
                   </PieChart>
                 </ResponsiveContainer>
 
-                {/* Donut Center Label (as in Image 1: $8.47M Total) */}
+                {/* Donut Center Label */}
                 <div className="absolute inset-0 flex flex-col items-center justify-center pointer-events-none">
                   <span className="text-xs font-bold font-mono" style={{ color: theme.textPrimary }}>
                     {formatMetricValue(totalMetricSum, metric1Col?.isCurrency, metric1Col?.isPercentage)}
@@ -547,7 +583,7 @@ export const ChartsSection: React.FC<ChartsSectionProps> = ({
                 </div>
               </div>
 
-              {/* Legend with percentages (matching Image 1 list) */}
+              {/* Legend with percentages */}
               <div className="sm:col-span-6 space-y-2 max-h-56 overflow-y-auto pr-1">
                 {pieChartData.slice(0, 6).map((item, idx) => {
                   const share = totalMetricSum > 0 ? ((item.value / totalMetricSum) * 100).toFixed(1) : '0';
@@ -575,13 +611,15 @@ export const ChartsSection: React.FC<ChartsSectionProps> = ({
                 })}
               </div>
             </div>
-          </div>
+          </motion.div>
         )}
 
         {/* 3. Bar Chart (Rankings & Volumes) */}
         {(activeTab === 'all' || activeTab === 'bar') && (
-          <div
+          <motion.div
             id="chart-container-bar"
+            variants={chartCardVariants}
+            whileHover={{ y: -2, transition: { duration: 0.2 } }}
             className="rounded-2xl p-4.5 border transition-all duration-300 shadow-sm"
             style={{
               backgroundColor: theme.bgCard,
@@ -644,13 +682,15 @@ export const ChartsSection: React.FC<ChartsSectionProps> = ({
                 </BarChart>
               </ResponsiveContainer>
             </div>
-          </div>
+          </motion.div>
         )}
 
         {/* 4. Cross-Variable Correlation / Scatter Chart */}
         {(activeTab === 'all' || activeTab === 'scatter') && (
-          <div
+          <motion.div
             id="chart-container-composed"
+            variants={chartCardVariants}
+            whileHover={{ y: -2, transition: { duration: 0.2 } }}
             className="rounded-2xl p-4.5 border transition-all duration-300 shadow-sm"
             style={{
               backgroundColor: theme.bgCard,
@@ -722,9 +762,9 @@ export const ChartsSection: React.FC<ChartsSectionProps> = ({
                 </ComposedChart>
               </ResponsiveContainer>
             </div>
-          </div>
+          </motion.div>
         )}
-      </div>
+      </motion.div>
     </div>
   );
 };

@@ -44,7 +44,8 @@ import {
   Palette,
   Terminal,
   Share2,
-  ExternalLink
+  ExternalLink,
+  BarChart3,
 } from 'lucide-react';
 
 export default function App() {
@@ -460,6 +461,7 @@ export default function App() {
           updateCount={updateCount}
           onOpenConverterModal={() => setIsWorkbookModalOpen(true)}
           fileName={fileName}
+          datasetName={datasetName}
           totalRecordsCount={records.length}
           activeView={activeView}
           onChangeView={setActiveView}
@@ -470,7 +472,6 @@ export default function App() {
           onSelectTheme={setCurrentThemeId}
           onOpenShareModal={() => setIsShareModalOpen(true)}
           isSharedMode={isSharedMode}
-          onExitSharedMode={() => setIsSharedMode(false)}
         />
 
         {/* Sub-Header: Demo Dataset Quick Selectors + Live Feed & SQLite Status */}
@@ -580,7 +581,7 @@ export default function App() {
                       color: '#FFFFFF',
                     }}
                   >
-                    Live Shared Dashboard
+                    Live Shared View
                   </span>
                   <span className="font-bold text-sm" style={{ color: theme.textPrimary }}>
                     {datasetName}
@@ -600,20 +601,10 @@ export default function App() {
                       borderColor: theme.borderSubtle,
                       color: theme.accentPrimary,
                     }}
+                    title="Share this configured view"
                   >
                     <Share2 className="w-3.5 h-3.5" />
                     <span>Share This View</span>
-                  </button>
-
-                  <button
-                    onClick={() => setIsSharedMode(false)}
-                    className="inline-flex items-center space-x-1 text-xs font-bold px-3 py-1 rounded-xl border transition cursor-pointer text-white"
-                    style={{
-                      background: theme.accentGradient,
-                    }}
-                  >
-                    <span>Open Full Studio</span>
-                    <ExternalLink className="w-3 h-3 ml-0.5" />
                   </button>
                 </div>
               </div>
@@ -777,21 +768,25 @@ export default function App() {
         }}
       />
 
-      {/* Multi-Tab Excel Workbook Generator Modal */}
-      <WorkbookModal
-        isOpen={isWorkbookModalOpen}
-        onClose={() => setIsWorkbookModalOpen(false)}
-        records={filteredRecords}
-        profile={profile}
-      />
+      {/* Multi-Tab Excel Workbook Generator Modal (Only in Studio Mode) */}
+      {!isSharedMode && (
+        <WorkbookModal
+          isOpen={isWorkbookModalOpen}
+          onClose={() => setIsWorkbookModalOpen(false)}
+          records={filteredRecords}
+          profile={profile}
+        />
+      )}
 
-      {/* Real-time Activity Changelog Drawer */}
-      <ActivityLogDrawer
-        isOpen={isLogDrawerOpen}
-        onClose={() => setIsLogDrawerOpen(false)}
-        events={events}
-        onClearLogs={() => setEvents([])}
-      />
+      {/* Real-time Activity Changelog Drawer (Only in Studio Mode) */}
+      {!isSharedMode && (
+        <ActivityLogDrawer
+          isOpen={isLogDrawerOpen}
+          onClose={() => setIsLogDrawerOpen(false)}
+          events={events}
+          onClearLogs={() => setEvents([])}
+        />
+      )}
 
       {/* Footer */}
       <footer
@@ -812,14 +807,14 @@ export default function App() {
                 borderColor: theme.borderSubtle,
               }}
             >
-              <Database className="w-3.5 h-3.5" />
+              {isSharedMode ? <BarChart3 className="w-3.5 h-3.5" /> : <Database className="w-3.5 h-3.5" />}
             </div>
             <span className="font-bold" style={{ color: theme.textPrimary }}>
-              SQLite Engine &bull; Multi-Theme Universal Dashboard Showcase
+              {isSharedMode ? `${datasetName} • Live Interactive Analytics Dashboard` : 'SQLite Engine • Multi-Theme Universal Dashboard Showcase'}
             </span>
           </div>
           <p style={{ color: theme.textMuted }}>
-            WASM SQLite SQL Console &bull; 6 Curated Visual Themes &bull; Real-time Excel Synchronization &bull; Universal File Ingestion
+            {isSharedMode ? 'Dynamic KPI Aggregations • Universal Interactive Filters • High-Resolution Visualizations' : 'WASM SQLite SQL Console • 6 Curated Visual Themes • Real-time Excel Synchronization • Universal File Ingestion'}
           </p>
         </div>
       </footer>

@@ -1,4 +1,5 @@
 import React from 'react';
+import { motion, AnimatePresence } from 'motion/react';
 import { 
   DollarSign, 
   Users, 
@@ -24,6 +25,31 @@ interface KPIGridProps {
   isRealtimeActive?: boolean;
   theme?: ThemeConfig;
 }
+
+const containerVariants = {
+  hidden: { opacity: 0 },
+  visible: {
+    opacity: 1,
+    transition: {
+      staggerChildren: 0.08,
+      delayChildren: 0.05,
+    },
+  },
+};
+
+const cardVariants = {
+  hidden: { opacity: 0, y: 18, scale: 0.96 },
+  visible: {
+    opacity: 1,
+    y: 0,
+    scale: 1,
+    transition: {
+      type: 'spring',
+      stiffness: 280,
+      damping: 24,
+    },
+  },
+};
 
 export const KPIGrid: React.FC<KPIGridProps> = ({
   profile,
@@ -85,7 +111,7 @@ export const KPIGrid: React.FC<KPIGridProps> = ({
   const isGold = theme.id === 'obsidian_gold';
   const isMauve = theme.id === 'berry_noir';
 
-  // Specific neon borders for Cyber Fleet (as in Image 3)
+  // Specific neon borders for Cyber Fleet
   const getCyberBorder = (index: number) => {
     if (!isCyber) return {};
     const borders = [
@@ -97,11 +123,22 @@ export const KPIGrid: React.FC<KPIGridProps> = ({
     return borders[index % borders.length];
   };
 
+  // Unique trigger key for entrance animations on dataset change or filter modification
+  const animationKey = `${profile?.name || 'dataset'}-${filteredCount}-${totalCount}-${primarySum.toFixed(0)}`;
+
   return (
-    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+    <motion.div
+      key={animationKey}
+      variants={containerVariants}
+      initial="hidden"
+      animate="visible"
+      className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4"
+    >
       {/* 1. Total Volume / Records Card */}
-      <div 
+      <motion.div 
         id="kpi-card-total-records"
+        variants={cardVariants}
+        whileHover={{ y: -3, transition: { duration: 0.2 } }}
         className="rounded-2xl p-4.5 border transition-all duration-300 relative overflow-hidden group shadow-sm flex flex-col justify-between"
         style={{
           backgroundColor: theme.bgCard,
@@ -164,11 +201,13 @@ export const KPIGrid: React.FC<KPIGridProps> = ({
           <span>Attributes: <strong style={{ color: theme.textPrimary }}>{profile.columnCount} cols</strong></span>
           <span>Groups: <strong style={{ color: isCyber ? '#10B981' : theme.accentPrimary }}>{Object.keys(dimFrequency).length}</strong></span>
         </div>
-      </div>
+      </motion.div>
 
       {/* 2. Primary Metric Aggregate Sum & Avg */}
-      <div 
+      <motion.div 
         id="kpi-card-primary-metric"
+        variants={cardVariants}
+        whileHover={{ y: -3, transition: { duration: 0.2 } }}
         className="rounded-2xl p-4.5 border transition-all duration-300 relative overflow-hidden group shadow-sm flex flex-col justify-between"
         style={{
           backgroundColor: theme.bgCard,
@@ -234,11 +273,13 @@ export const KPIGrid: React.FC<KPIGridProps> = ({
             <span>Med: <strong style={{ color: isCyber ? '#06B6D4' : theme.accentPrimary }}>{formatMetricValue(primaryMetricCol.median, primaryMetricCol.isCurrency, primaryMetricCol.isPercentage)}</strong></span>
           )}
         </div>
-      </div>
+      </motion.div>
 
       {/* 3. Secondary Metric or Ratio Card */}
-      <div 
+      <motion.div 
         id="kpi-card-secondary-metric"
+        variants={cardVariants}
+        whileHover={{ y: -3, transition: { duration: 0.2 } }}
         className="rounded-2xl p-4.5 border transition-all duration-300 relative overflow-hidden group shadow-sm flex flex-col justify-between"
         style={{
           backgroundColor: theme.bgCard,
@@ -298,11 +339,13 @@ export const KPIGrid: React.FC<KPIGridProps> = ({
             <span>Max: <strong style={{ color: isCyber ? '#F59E0B' : theme.accentSecondary }}>{formatMetricValue(secondaryMetricCol.max, secondaryMetricCol.isCurrency, secondaryMetricCol.isPercentage)}</strong></span>
           )}
         </div>
-      </div>
+      </motion.div>
 
       {/* 4. Top Category Leader Card */}
-      <div 
+      <motion.div 
         id="kpi-card-top-leader"
+        variants={cardVariants}
+        whileHover={{ y: -3, transition: { duration: 0.2 } }}
         className="rounded-2xl p-4.5 border transition-all duration-300 relative overflow-hidden group shadow-sm flex flex-col justify-between"
         style={{
           backgroundColor: theme.bgCard,
@@ -358,7 +401,7 @@ export const KPIGrid: React.FC<KPIGridProps> = ({
           <span>Share: <strong style={{ color: isCyber ? '#EF4444' : theme.accentPrimary }}>{primarySum > 0 && topCategory.metricSum > 0 ? `${((topCategory.metricSum / primarySum) * 100).toFixed(0)}%` : '—'}</strong></span>
           <span>Vol: <strong style={{ color: theme.textPrimary }}>{topCategory.metricSum > 0 && primaryMetricCol ? formatMetricValue(topCategory.metricSum, primaryMetricCol.isCurrency, primaryMetricCol.isPercentage) : `${topCategory.count}`}</strong></span>
         </div>
-      </div>
-    </div>
+      </motion.div>
+    </motion.div>
   );
 };

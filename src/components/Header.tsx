@@ -28,6 +28,7 @@ interface HeaderProps {
   updateCount: number;
   onOpenConverterModal: () => void;
   fileName: string;
+  datasetName?: string;
   totalRecordsCount: number;
   activeView: 'schema' | 'dashboard' | 'table' | 'sqlite';
   onChangeView: (view: 'schema' | 'dashboard' | 'table' | 'sqlite') => void;
@@ -41,7 +42,6 @@ interface HeaderProps {
   onOpenShareModal?: () => void;
   sqliteInitialized?: boolean;
   isSharedMode?: boolean;
-  onExitSharedMode?: () => void;
 }
 
 export const Header: React.FC<HeaderProps> = ({
@@ -56,6 +56,7 @@ export const Header: React.FC<HeaderProps> = ({
   updateCount,
   onOpenConverterModal,
   fileName,
+  datasetName,
   totalRecordsCount,
   activeView,
   onChangeView,
@@ -69,7 +70,6 @@ export const Header: React.FC<HeaderProps> = ({
   onOpenShareModal,
   sqliteInitialized = true,
   isSharedMode = false,
-  onExitSharedMode,
 }) => {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const theme: ThemeConfig = propTheme || propCurrentTheme || (currentThemeId ? getTheme(currentThemeId) : getTheme('berry_noir'));
@@ -102,12 +102,12 @@ export const Header: React.FC<HeaderProps> = ({
                 color: theme.accentPrimary,
               }}
             >
-              <Database className="w-5 h-5" />
+              {isSharedMode ? <BarChart3 className="w-5 h-5" /> : <Database className="w-5 h-5" />}
             </div>
             <div>
               <div className="flex items-center space-x-2">
                 <h1 className="text-base sm:text-lg font-bold tracking-tight" style={{ color: theme.textPrimary }}>
-                  Universal SQLite & BI Studio
+                  {isSharedMode ? (datasetName || 'Executive Live Dashboard') : 'Universal SQLite & BI Studio'}
                 </h1>
                 <span
                   className="inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-bold font-mono"
@@ -118,11 +118,11 @@ export const Header: React.FC<HeaderProps> = ({
                   }}
                 >
                   <span className="w-1.5 h-1.5 rounded-full mr-1 animate-pulse" style={{ backgroundColor: theme.accentPrimary }} />
-                  SQLite Active
+                  {isSharedMode ? 'Live Dashboard' : 'SQLite Active'}
                 </span>
               </div>
               <p className="text-xs flex items-center space-x-2 mt-0.5" style={{ color: theme.textSecondary }}>
-                <span>File: <strong style={{ color: theme.textPrimary }}>{fileName}</strong> ({totalRecordsCount.toLocaleString()} rows &bull; {columnCount} cols)</span>
+                <span>{isSharedMode ? 'Dataset: ' : 'File: '}<strong style={{ color: theme.textPrimary }}>{fileName}</strong> ({totalRecordsCount.toLocaleString()} rows &bull; {columnCount} metrics/dims)</span>
                 <span>&bull;</span>
                 <span className="font-mono text-[11px] opacity-80">{lastSyncTime.toLocaleTimeString()}</span>
               </p>
@@ -204,15 +204,15 @@ export const Header: React.FC<HeaderProps> = ({
             </div>
           ) : (
             <div
-              className="flex items-center space-x-2 px-3 py-1.5 rounded-xl border text-xs font-semibold"
+              className="flex items-center space-x-2 px-3.5 py-1.5 rounded-xl border text-xs font-bold shadow-2xs"
               style={{
                 backgroundColor: theme.bgBadge,
                 borderColor: theme.borderSubtle,
                 color: theme.accentPrimary,
               }}
             >
-              <BarChart3 className="w-3.5 h-3.5" />
-              <span>Live Shared Executive View</span>
+              <BarChart3 className="w-4 h-4" />
+              <span>Interactive Live Dashboard</span>
             </div>
           )}
 
@@ -242,7 +242,7 @@ export const Header: React.FC<HeaderProps> = ({
                 color: theme.textPrimary,
                 border: `1px solid ${theme.borderCard}`,
               }}
-              title="Change Visual Theme (Berry Noir, Obsidian Gold, Cyber Neon HUD, etc.)"
+              title="Change Visual Theme"
             >
               <Palette className="w-3.5 h-3.5" style={{ color: theme.accentPrimary }} />
               <span className="font-semibold">{theme.name.split('&')[0]}</span>
@@ -292,22 +292,6 @@ export const Header: React.FC<HeaderProps> = ({
                 </div>
               )}
             </div>
-
-            {/* If in shared mode, option to open full studio */}
-            {isSharedMode && onExitSharedMode && (
-              <button
-                id="exit-shared-mode-btn"
-                onClick={onExitSharedMode}
-                className="flex items-center space-x-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold border transition cursor-pointer"
-                style={{
-                  backgroundColor: theme.bgInput,
-                  borderColor: theme.borderSubtle,
-                  color: theme.textPrimary,
-                }}
-              >
-                <span>Full Studio View</span>
-              </button>
-            )}
 
             {!isSharedMode ? (
               <>
@@ -388,7 +372,7 @@ export const Header: React.FC<HeaderProps> = ({
               <button
                 id="export-csv-btn"
                 onClick={onExportCSV}
-                className="flex items-center space-x-1 px-2.5 py-1.5 rounded-xl text-xs font-semibold transition cursor-pointer"
+                className="flex items-center space-x-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold transition cursor-pointer"
                 style={{
                   backgroundColor: theme.bgInput,
                   color: theme.textSecondary,
@@ -397,7 +381,7 @@ export const Header: React.FC<HeaderProps> = ({
                 title="Export Current Filtered Dataset as CSV"
               >
                 <FileText className="w-3.5 h-3.5" />
-                <span className="hidden sm:inline">CSV</span>
+                <span>Export CSV</span>
               </button>
             )}
           </div>
