@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useMemo } from 'react';
 import { 
   Share2, 
   Copy, 
@@ -14,11 +14,15 @@ import {
   Filter,
   FileSpreadsheet,
   Layers,
-  Database
+  Database,
+  ArrowRight,
+  Download,
+  Code
 } from 'lucide-react';
 import { ThemeConfig, ThemeId } from '../themes';
 import { DatasetProfile, GenericRecord, UniversalFilterState } from '../types';
 import { encodeDatasetToCompressedString } from '../utils/datasetStorage';
+import { exportUniversalCSV } from '../utils/universalExcelEngine';
 
 interface ShareDashboardModalProps {
   isOpen: boolean;
@@ -55,26 +59,26 @@ export const ShareDashboardModal: React.FC<ShareDashboardModalProps> = ({
   const [includeTheme, setIncludeTheme] = useState<boolean>(true);
   const [includeRealtime, setIncludeRealtime] = useState<boolean>(true);
   const [copied, setCopied] = useState<boolean>(false);
-  const [generatedUrl, setGeneratedUrl] = useState<string>('');
-  const [isGenerating, setIsGenerating] = useState<boolean>(false);
+  const [copiedJson, setCopiedJson] = useState<boolean>(false);
 
-  useEffect(() => {
-    if (!isOpen || typeof window === 'undefined') return;
-
-    setIsGenerating(true);
+  // Compute shareable URL synchronously so it is never empty or delayed
+  const generatedUrl = useMemo(() => {
+    if (typeof window === 'undefined') return '';
 
     try {
       const url = new URL(window.location.origin + window.location.pathname);
       url.searchParams.set('shared', 'true');
       url.searchParams.set('view', 'dashboard');
 
-      if (isCustomUpload || !sampleId) {
-        // Encode custom uploaded CSV/Excel records into compressed URL hash payload
-        const compressed = encodeDatasetToCompressedString(records, profile, datasetName, fileName);
-        if (compressed) {
-          url.hash = `data=${compressed}`;
-        }
-      } else {
+      // CRITICAL: Always encode the exact snapshot of records, profile, datasetName, and fileName
+      // so any new rows, manual edits, custom metrics, and uploaded files are ALWAYS preserved and displayed.
+      const compressed = encodeDatasetToCompressedString(records, profile, datasetName, fileName);
+      if (compressed) {
+        url.hash = `data=${compressed}`;
+      }
+
+      // If sampleId is present, also keep it as fallback metadata
+      if (sampleId) {
         url.searchParams.set('sample', sampleId);
       }
 
@@ -90,21 +94,33 @@ export const ShareDashboardModal: React.FC<ShareDashboardModalProps> = ({
         if (activePreset && activePreset !== 'All Records') {
           url.searchParams.set('preset', activePreset);
         }
-        if (filters.searchQuery?.trim()) {
+        if (filters?.searchQuery?.trim()) {
           url.searchParams.set('q', filters.searchQuery.trim());
+        }
+        // If categorical filters or numeric ranges are active, encode them
+        const hasCat = Object.keys(filters?.categoricalFilters || {}).some(
+          (k) => filters.categoricalFilters[k] && filters.categoricalFilters[k].length > 0
+        );
+        const hasNum = Object.keys(filters?.numericRanges || {}).length > 0;
+        if (hasCat || hasNum) {
+          try {
+            const filterPayload = JSON.stringify({
+              c: filters.categoricalFilters,
+              n: filters.numericRanges,
+            });
+            url.searchParams.set('fstate', encodeURIComponent(filterPayload));
+          } catch {
+            // Ignore serialization error
+          }
         }
       }
 
-      setGeneratedUrl(url.toString());
-    } catch (e) {
-      setGeneratedUrl(window.location.href);
-    } finally {
-      setIsGenerating(false);
+      return url.toString();
+    } catch {
+      return typeof window !== 'undefined' ? window.location.href : '';
     }
   }, [
-    isOpen, 
     sampleId, 
-    isCustomUpload, 
     records, 
     profile, 
     datasetName, 
@@ -115,29 +131,60 @@ export const ShareDashboardModal: React.FC<ShareDashboardModalProps> = ({
     isRealtimeActive, 
     includeFilters, 
     activePreset, 
-    filters.searchQuery
+    filters
   ]);
 
   if (!isOpen) return null;
 
   const handleCopy = async () => {
+    if (!generatedUrl) return;
+
     try {
-      await navigator.clipboard.writeText(generatedUrl);
-      setCopied(true);
-      setTimeout(() => setCopied(false), 3000);
-    } catch (err) {
-      const input = document.getElementById('share-url-input') as HTMLInputElement;
-      if (input) {
-        input.select();
-        document.execCommand('copy');
+      if (navigator?.clipboard?.writeText) {
+        await navigator.clipboard.writeText(generatedUrl);
         setCopied(true);
         setTimeout(() => setCopied(false), 3000);
+        return;
       }
+    } catch {
+      // Fallback to select & execCommand
+    }
+
+    const input = document.getElementById('share-url-input') as HTMLInputElement;
+    if (input) {
+      input.select();
+      input.setSelectionRange(0, 99999);
+      document.execCommand('copy');
+      setCopied(true);
+      setTimeout(() => setCopied(false), 3000);
     }
   };
 
-  const handleOpenLink = () => {
-    window.open(generatedUrl, '_blank');
+  const handleCopyJson = async () => {
+    try {
+      const payload = {
+        name: datasetName,
+        fileName,
+        profile: {
+          primaryDimension: profile.primaryDimensionKey,
+          primaryMetric: profile.primaryMetricKey,
+          columns: profile.columns.map((c) => ({ key: c.key, name: c.name, type: c.type })),
+        },
+        records,
+      };
+      const text = JSON.stringify(payload, null, 2);
+      if (navigator?.clipboard?.writeText) {
+        await navigator.clipboard.writeText(text);
+      }
+      setCopiedJson(true);
+      setTimeout(() => setCopiedJson(false), 3000);
+    } catch (e) {
+      console.warn('Could not copy JSON:', e);
+    }
+  };
+
+  const handleDownloadCsv = () => {
+    exportUniversalCSV(records, profile, fileName || `${datasetName.toLowerCase().replace(/\s+/g, '_')}.csv`);
   };
 
   return (
@@ -168,7 +215,7 @@ export const ShareDashboardModal: React.FC<ShareDashboardModalProps> = ({
                 Share Live Dashboard
               </h3>
               <p className="text-xs" style={{ color: theme.textMuted }}>
-                Recipients view the exact interactive dashboard, charts & filters
+                Generate a live, interactive link for stakeholders and team members
               </p>
             </div>
           </div>
@@ -219,7 +266,7 @@ export const ShareDashboardModal: React.FC<ShareDashboardModalProps> = ({
                 borderColor: theme.borderSubtle,
               }}
             >
-              {isCustomUpload ? 'Custom Upload' : 'Preloaded Sample'}
+              {isCustomUpload ? 'Self-Contained' : 'Preloaded Sample'}
             </span>
           </div>
 
@@ -228,10 +275,10 @@ export const ShareDashboardModal: React.FC<ShareDashboardModalProps> = ({
             <label className="text-xs font-semibold flex items-center justify-between" style={{ color: theme.textSecondary }}>
               <span className="flex items-center gap-1.5">
                 <LinkIcon className="w-3.5 h-3.5" style={{ color: theme.accentPrimary }} />
-                Shareable Dashboard Link
+                Shareable Dashboard URL
               </span>
-              <span className="text-[11px] font-normal" style={{ color: theme.accentSecondary }}>
-                {isCustomUpload ? 'Self-Contained Data Snapshot' : 'Live & Filter-Enabled'}
+              <span className="text-[11px] font-mono font-normal" style={{ color: theme.accentSecondary }}>
+                {isCustomUpload ? 'Complete Dataset in Link Hash' : 'Interactive URL'}
               </span>
             </label>
             <div
@@ -245,15 +292,17 @@ export const ShareDashboardModal: React.FC<ShareDashboardModalProps> = ({
                 id="share-url-input"
                 type="text"
                 readOnly
-                value={isGenerating ? 'Generating share link...' : generatedUrl}
-                className="w-full px-2.5 py-1.5 text-xs font-mono bg-transparent border-none focus:outline-none truncate"
+                value={generatedUrl}
+                onClick={(e) => (e.target as HTMLInputElement).select()}
+                className="w-full px-2.5 py-1.5 text-xs font-mono bg-transparent border-none focus:outline-none truncate cursor-text"
                 style={{ color: theme.textPrimary }}
               />
               <button
+                id="copy-share-url-btn"
                 onClick={handleCopy}
-                disabled={isGenerating}
-                className="flex items-center space-x-1 px-3 py-1.5 rounded-lg text-xs font-bold text-white transition cursor-pointer shrink-0 shadow-xs hover:opacity-90 disabled:opacity-50"
+                className="flex items-center space-x-1 px-3 py-1.5 rounded-lg text-xs font-bold text-white transition cursor-pointer shrink-0 shadow-xs hover:opacity-90 active:scale-95"
                 style={{ background: theme.accentGradient }}
+                title="Copy share link to clipboard"
               >
                 {copied ? (
                   <>
@@ -263,11 +312,16 @@ export const ShareDashboardModal: React.FC<ShareDashboardModalProps> = ({
                 ) : (
                   <>
                     <Copy className="w-3.5 h-3.5" />
-                    <span>Copy</span>
+                    <span>Copy Link</span>
                   </>
                 )}
               </button>
             </div>
+            {copied && (
+              <p className="text-[11px] font-semibold text-emerald-500 animate-fadeIn flex items-center gap-1">
+                <Check className="w-3 h-3" /> Link copied to clipboard! Ready to paste and share with anyone.
+              </p>
+            )}
           </div>
 
           {/* Configuration Toggles */}
@@ -343,6 +397,50 @@ export const ShareDashboardModal: React.FC<ShareDashboardModalProps> = ({
             </label>
           </div>
 
+          {/* Direct Snapshot Tools */}
+          <div
+            className="p-3 rounded-xl border flex flex-wrap items-center justify-between gap-2 text-xs"
+            style={{
+              backgroundColor: theme.bgInput,
+              borderColor: theme.borderSubtle,
+            }}
+          >
+            <div className="flex items-center space-x-2">
+              <Code className="w-3.5 h-3.5" style={{ color: theme.accentPrimary }} />
+              <span className="font-semibold" style={{ color: theme.textSecondary }}>
+                Data Snapshot Tools:
+              </span>
+            </div>
+            <div className="flex items-center space-x-2">
+              <button
+                onClick={handleCopyJson}
+                className="px-2.5 py-1 rounded-lg text-xs font-semibold border transition cursor-pointer hover:opacity-80 flex items-center space-x-1"
+                style={{
+                  backgroundColor: theme.bgBadge,
+                  borderColor: theme.borderSubtle,
+                  color: theme.textPrimary,
+                }}
+                title="Copy entire dataset structure as JSON"
+              >
+                {copiedJson ? <Check className="w-3 h-3 text-emerald-500" /> : <Copy className="w-3 h-3" />}
+                <span>{copiedJson ? 'JSON Copied!' : 'Copy JSON'}</span>
+              </button>
+              <button
+                onClick={handleDownloadCsv}
+                className="px-2.5 py-1 rounded-lg text-xs font-semibold border transition cursor-pointer hover:opacity-80 flex items-center space-x-1"
+                style={{
+                  backgroundColor: theme.bgBadge,
+                  borderColor: theme.borderSubtle,
+                  color: theme.textPrimary,
+                }}
+                title="Download active records as CSV"
+              >
+                <Download className="w-3 h-3 text-emerald-500" />
+                <span>Export CSV</span>
+              </button>
+            </div>
+          </div>
+
           {/* Recipient Experience info card */}
           <div
             className="p-3 rounded-xl border flex items-start space-x-2.5 text-xs"
@@ -354,11 +452,11 @@ export const ShareDashboardModal: React.FC<ShareDashboardModalProps> = ({
             <Eye className="w-4 h-4 shrink-0 mt-0.5" style={{ color: theme.accentPrimary }} />
             <div>
               <span className="font-bold block" style={{ color: theme.textPrimary }}>
-                {isCustomUpload ? 'Full Custom Data Included' : 'Live Dashboard Experience'}
+                {isCustomUpload ? 'Self-Contained Data Snapshot' : 'Live Dashboard Experience'}
               </span>
               <p className="text-[11px] mt-0.5" style={{ color: theme.textSecondary }}>
                 {isCustomUpload 
-                  ? 'Recipients receive your uploaded file schema, calculated metrics, KPIs, and all visual charts with full interactivity.'
+                  ? 'Recipients receive the complete uploaded dataset, calculated metrics, KPIs, and all visual charts with full interactivity.'
                   : 'Recipients get a clean, presentation-ready live dashboard showcasing Executive KPIs, dynamic categorical & numeric filters, and responsive charts.'
                 }
               </p>
@@ -367,23 +465,30 @@ export const ShareDashboardModal: React.FC<ShareDashboardModalProps> = ({
         </div>
 
         {/* Footer Actions */}
-        <div className="p-4 border-t flex items-center justify-between" style={{ borderColor: theme.borderSubtle }}>
-          <button
-            onClick={handleOpenLink}
-            className="flex items-center space-x-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold border transition cursor-pointer hover:opacity-80"
-            style={{
-              backgroundColor: theme.bgInput,
-              borderColor: theme.borderSubtle,
-              color: theme.textPrimary,
-            }}
-          >
-            <ExternalLink className="w-3.5 h-3.5" style={{ color: theme.accentPrimary }} />
-            <span>Test Link in New Tab</span>
-          </button>
+        <div className="p-4 border-t flex flex-wrap items-center justify-between gap-2" style={{ borderColor: theme.borderSubtle }}>
+          <div className="flex items-center space-x-2">
+            {/* Native Link to bypass popup blockers */}
+            <a
+              id="test-share-link-tab"
+              href={generatedUrl}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="inline-flex items-center space-x-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold border transition cursor-pointer hover:opacity-80 shadow-2xs"
+              style={{
+                backgroundColor: theme.bgInput,
+                borderColor: theme.borderSubtle,
+                color: theme.textPrimary,
+              }}
+              title="Open the share link in a new browser tab"
+            >
+              <ExternalLink className="w-3.5 h-3.5" style={{ color: theme.accentPrimary }} />
+              <span>Open in New Tab</span>
+            </a>
+          </div>
 
           <button
             onClick={onClose}
-            className="px-4 py-1.5 rounded-xl text-xs font-bold text-white transition cursor-pointer hover:opacity-90"
+            className="px-4 py-1.5 rounded-xl text-xs font-bold text-white transition cursor-pointer hover:opacity-90 shadow-xs"
             style={{ background: theme.accentGradient }}
           >
             Done

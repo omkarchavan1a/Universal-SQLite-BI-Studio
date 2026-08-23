@@ -79,8 +79,12 @@ function resolveInitialDataset(): {
   }
 
   const urlParams = new URLSearchParams(window.location.search);
-  const hash = window.location.hash;
-  const isShared = urlParams.get('shared') === 'true' || urlParams.get('mode') === 'dashboard';
+  const hash = window.location.hash || '';
+  const isShared = 
+    urlParams.get('shared') === 'true' || 
+    urlParams.get('mode') === 'dashboard' || 
+    urlParams.get('view') === 'dashboard' ||
+    hash.includes('data=');
 
   // 1. Check for URL Hash compressed payload (#data=...) or query param (?data=...)
   let dataPayload = '';
@@ -108,12 +112,19 @@ function resolveInitialDataset(): {
     }
   }
 
-  // 2. Check for ?sample=... param
+  // 2. Check for ?sample=... param (by id, name, or index)
   const sampleParam = urlParams.get('sample');
   if (sampleParam) {
-    const idx = sampleDatasets.findIndex(
-      (s) => s.id === sampleParam || s.name.toLowerCase() === sampleParam.toLowerCase()
+    const cleanParam = sampleParam.toLowerCase().trim();
+    let idx = sampleDatasets.findIndex(
+      (s) => 
+        s.id.toLowerCase() === cleanParam || 
+        s.name.toLowerCase() === cleanParam ||
+        s.id.toLowerCase().replace(/_/g, '') === cleanParam.replace(/_/g, '')
     );
+    if (idx === -1 && !isNaN(Number(sampleParam)) && sampleDatasets[Number(sampleParam)]) {
+      idx = Number(sampleParam);
+    }
     if (idx !== -1) {
       const sample = sampleDatasets[idx];
       return {
@@ -236,11 +247,27 @@ export default function App() {
 
   // Universal Filters
   const [filters, setFilters] = useState<UniversalFilterState>(() => {
-    const initialQuery = typeof window !== 'undefined' ? new URLSearchParams(window.location.search).get('q') || '' : '';
+    if (typeof window === 'undefined') {
+      return { searchQuery: '', categoricalFilters: {}, numericRanges: {} };
+    }
+    const params = new URLSearchParams(window.location.search);
+    const initialQuery = params.get('q') || '';
+    let catFilters: Record<string, string[]> = {};
+    let numFilters: Record<string, [number, number]> = {};
+    const fstate = params.get('fstate');
+    if (fstate) {
+      try {
+        const decoded = JSON.parse(decodeURIComponent(fstate));
+        if (decoded?.c) catFilters = decoded.c;
+        if (decoded?.n) numFilters = decoded.n;
+      } catch {
+        // ignore
+      }
+    }
     return {
       searchQuery: initialQuery,
-      categoricalFilters: {},
-      numericRanges: {},
+      categoricalFilters: catFilters,
+      numericRanges: numFilters,
     };
   });
   const [activePreset, setActivePreset] = useState<string>(() => {
@@ -546,6 +573,126 @@ export default function App() {
     showNotification(`Record ${recordId} removed.`);
   }, [profile.idKey]);
 
+  // Apply shared view from URL or "Preview Here" action
+  const handleApplySharedView = (shareUrl: string) => {
+    try {
+      const urlObj = new URL(shareUrl);
+      const urlParams = urlObj.searchParams;
+      const hash = urlObj.hash || '';
+
+      // Check for compressed data payload
+      let dataPayload = '';
+      if (hash.startsWith('#data=')) {
+        dataPayload = hash.substring('#data='.length);
+      } else if (hash.includes('data=')) {
+        const match = hash.match(/data=([^&]+)/);
+        if (match) dataPayload = match[1];
+      }
+      if (!dataPayload) {
+        dataPayload = urlParams.get('data') || '';
+      }
+
+      if (dataPayload) {
+        const decoded = decodeDatasetFromCompressedString(dataPayload);
+        if (decoded && decoded.records && decoded.records.length > 0) {
+          setRecords(decoded.records);
+          setProfile(decoded.profile);
+          setDatasetName(decoded.datasetName);
+          setFileName(decoded.fileName);
+          setCurrentSampleIndex(-1);
+        }
+      } else {
+        const sampleParam = urlParams.get('sample');
+        if (sampleParam) {
+          const cleanParam = sampleParam.toLowerCase().trim();
+          let idx = sampleDatasets.findIndex(
+            (s) => 
+              s.id.toLowerCase() === cleanParam || 
+              s.name.toLowerCase() === cleanParam ||
+              s.id.toLowerCase().replace(/_/g, '') === cleanParam.replace(/_/g, '')
+          );
+          if (idx === -1 && !isNaN(Number(sampleParam)) && sampleDatasets[Number(sampleParam)]) {
+            idx = Number(sampleParam);
+          }
+          if (idx !== -1) {
+            const sample = sampleDatasets[idx];
+            setCurrentSampleIndex(idx);
+            setRecords(sample.records);
+            setProfile(profileDataset(sample.records, sample.name));
+            setDatasetName(sample.name);
+            setFileName(sample.fileName);
+          }
+        }
+      }
+
+      const themeParam = urlParams.get('theme') as ThemeId;
+      if (themeParam && THEMES[themeParam]) {
+        setCurrentThemeId(themeParam);
+      }
+
+      const liveParam = urlParams.get('live');
+      if (liveParam !== null) {
+        setIsRealtimeActive(liveParam === '1' || liveParam === 'true');
+      }
+
+      const presetParam = urlParams.get('preset');
+      const qParam = urlParams.get('q') || '';
+      const fstateParam = urlParams.get('fstate');
+      let catFilters: Record<string, string[]> = {};
+      let numFilters: Record<string, [number, number]> = {};
+      if (fstateParam) {
+        try {
+          const decodedF = JSON.parse(decodeURIComponent(fstateParam));
+          if (decodedF?.c) catFilters = decodedF.c;
+          if (decodedF?.n) numFilters = decodedF.n;
+        } catch {
+          // ignore
+        }
+      }
+      if (presetParam) {
+        handleApplyPreset(presetParam);
+      }
+      setFilters((prev) => ({
+        ...prev,
+        searchQuery: qParam,
+        categoricalFilters: catFilters,
+        numericRanges: numFilters,
+      }));
+
+      setIsSharedMode(true);
+      if (typeof window !== 'undefined') {
+        window.history.pushState({}, '', shareUrl);
+      }
+      showNotification('Loaded shared live dashboard view successfully!');
+    } catch (e) {
+      console.error('Failed to apply shared view:', e);
+    }
+  };
+
+  // Listen for browser back/forward or hash change to sync dataset state dynamically
+  useEffect(() => {
+    const handleUrlStateChange = () => {
+      const resolved = resolveInitialDataset();
+      if (resolved) {
+        setRecords(resolved.records);
+        setProfile(resolved.profile);
+        setDatasetName(resolved.datasetName);
+        setFileName(resolved.fileName);
+        setCurrentSampleIndex(resolved.sampleIndex);
+        if (resolved.isShared) {
+          setIsSharedMode(true);
+        }
+      }
+    };
+
+    window.addEventListener('hashchange', handleUrlStateChange);
+    window.addEventListener('popstate', handleUrlStateChange);
+    return () => {
+      window.removeEventListener('hashchange', handleUrlStateChange);
+      window.removeEventListener('popstate', handleUrlStateChange);
+    };
+  }, []);
+
   const handleResetData = () => {
     handleSelectSample(0);
   };
@@ -740,7 +887,7 @@ export default function App() {
                   {/* Share button in shared mode */}
                   <button
                     onClick={() => setIsShareModalOpen(true)}
-                    className="inline-flex items-center space-x-1.5 text-xs font-bold px-3 py-1 rounded-xl border transition cursor-pointer hover:opacity-80"
+                    className="inline-flex items-center space-x-1.5 text-xs font-bold px-3 py-1.5 rounded-xl border transition cursor-pointer hover:opacity-80 shadow-2xs"
                     style={{
                       backgroundColor: theme.bgInput,
                       borderColor: theme.borderSubtle,
@@ -750,26 +897,6 @@ export default function App() {
                   >
                     <Share2 className="w-3.5 h-3.5" />
                     <span>Share Link</span>
-                  </button>
-
-                  {/* Switch to Full Studio Mode */}
-                  <button
-                    onClick={() => {
-                      setIsSharedMode(false);
-                      const currentUrl = new URL(window.location.href);
-                      currentUrl.searchParams.delete('shared');
-                      currentUrl.searchParams.delete('mode');
-                      window.history.replaceState({}, '', currentUrl.toString());
-                      showNotification('Unlocked Full Studio Workbench: SQL console, schema editor, and file upload enabled.');
-                    }}
-                    className="inline-flex items-center space-x-1.5 text-xs font-bold px-3 py-1 rounded-xl border transition cursor-pointer text-white shadow-xs hover:opacity-90"
-                    style={{
-                      background: theme.accentGradient,
-                    }}
-                    title="Open full studio workbench mode"
-                  >
-                    <Sparkles className="w-3.5 h-3.5" />
-                    <span>Open Studio Workbench</span>
                   </button>
                 </div>
               </div>

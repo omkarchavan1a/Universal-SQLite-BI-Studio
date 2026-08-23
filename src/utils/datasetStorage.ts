@@ -81,7 +81,35 @@ export function decodeDatasetFromCompressedString(
   if (!compressedStr || typeof compressedStr !== 'string') return null;
 
   try {
-    const jsonString = LZString.decompressFromEncodedURIComponent(compressedStr.trim());
+    const raw = compressedStr.trim();
+    let jsonString: string | null = null;
+
+    // Strategy 1: Direct decompressFromEncodedURIComponent
+    jsonString = LZString.decompressFromEncodedURIComponent(raw);
+
+    // Strategy 2: Replace spaces with '+' (when query string parses '+' as space)
+    if (!jsonString && raw.includes(' ')) {
+      jsonString = LZString.decompressFromEncodedURIComponent(raw.replace(/ /g, '+'));
+    }
+
+    // Strategy 3: Decode URI component first if percent-encoded
+    if (!jsonString) {
+      try {
+        const uriDecoded = decodeURIComponent(raw);
+        jsonString = LZString.decompressFromEncodedURIComponent(uriDecoded);
+        if (!jsonString && uriDecoded.includes(' ')) {
+          jsonString = LZString.decompressFromEncodedURIComponent(uriDecoded.replace(/ /g, '+'));
+        }
+      } catch {
+        // ignore URI decode errors
+      }
+    }
+
+    // Strategy 4: Fallback to Base64 or standard decompression
+    if (!jsonString) {
+      jsonString = LZString.decompressFromBase64(raw) || LZString.decompress(raw);
+    }
+
     if (!jsonString) return null;
 
     const compact: CompactDatasetRepresentation = JSON.parse(jsonString);
