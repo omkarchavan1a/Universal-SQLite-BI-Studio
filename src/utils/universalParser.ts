@@ -363,3 +363,5 @@ export async function parseUploadedFile(file: File): Promise<{
     filename,
   };
 }
+
+export { parseUploadedFile as parseUniversalFile };

@@ -177,6 +177,7 @@ export interface SampleDataset {
   name: string;
   fileName: string;
   description: string;
+  category: string;
   records: GenericRecord[];
 }
 
@@ -186,6 +187,7 @@ export const sampleDatasets: SampleDataset[] = [
     name: 'Montgomery County Payroll & HR',
     fileName: 'Montgomery_Payroll_Sample.csv',
     description: 'Workforce salaries, overtime, longevity bonuses, gender split and pay grades.',
+    category: 'Human Resources',
     records: getPayrollData(),
   },
   {
@@ -193,6 +195,7 @@ export const sampleDatasets: SampleDataset[] = [
     name: 'Global E-Commerce Sales & Orders',
     fileName: 'Global_Ecommerce_Transactions.xlsx',
     description: 'Order transactions, product categories, revenue, profit margins, shipping regions and discounts.',
+    category: 'Retail & Commerce',
     records: generateEcommerceData(),
   },
   {
@@ -200,6 +203,7 @@ export const sampleDatasets: SampleDataset[] = [
     name: 'SaaS Platform & Customer Telemetry',
     fileName: 'SaaS_Customer_Telemetry.json',
     description: 'Subscription plans, MRR, retention rate, churn probability, NPS scores and server uptime.',
+    category: 'Cloud & Tech',
     records: generateSaasData(),
   },
   {
@@ -207,9 +211,14 @@ export const sampleDatasets: SampleDataset[] = [
     name: 'Warehouse Inventory & Logistics',
     fileName: 'Warehouse_Logistics_Inventory.csv',
     description: 'SKU stock levels, reorder points, warehouse facilities, holding costs and supplier ratings.',
+    category: 'Operations',
     records: generateSupplyChainData(),
   },
 ];
+
+export function getSampleDataset(sampleId: string): SampleDataset | undefined {
+  return sampleDatasets.find((s) => s.id === sampleId);
+}
 
 export function loadSampleDataset(sampleId: string): { records: GenericRecord[]; datasetName: string } {
   const found = sampleDatasets.find((s) => s.id === sampleId);

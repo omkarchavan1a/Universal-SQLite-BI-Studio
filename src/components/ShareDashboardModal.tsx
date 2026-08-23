@@ -17,11 +17,19 @@ import {
   Database,
   ArrowRight,
   Download,
-  Code
+  Code,
+  FolderKanban,
+  CheckCircle2,
 } from 'lucide-react';
 import { ThemeConfig, ThemeId } from '../themes';
-import { DatasetProfile, GenericRecord, UniversalFilterState } from '../types';
-import { encodeDatasetToCompressedString, saveSharedDataset, saveActiveCustomDataset } from '../utils/datasetStorage';
+import { DatasetProfile, GenericRecord, UniversalFilterState, ManagedDataset } from '../types';
+import { 
+  encodeDatasetToCompressedString, 
+  saveSharedDataset, 
+  saveActiveCustomDataset,
+  encodeDatasetWithDashboards,
+  encodeMultiDatasetBundle
+} from '../utils/datasetStorage';
 import { exportUniversalCSV } from '../utils/universalExcelEngine';
 
 interface ShareDashboardModalProps {
@@ -38,6 +46,9 @@ interface ShareDashboardModalProps {
   filters: UniversalFilterState;
   activePreset: string;
   isRealtimeActive: boolean;
+  datasets?: ManagedDataset[];
+  activeDatasetId?: string;
+  initialTargetDatasetId?: string;
 }
 
 export const ShareDashboardModal: React.FC<ShareDashboardModalProps> = ({
@@ -54,31 +65,69 @@ export const ShareDashboardModal: React.FC<ShareDashboardModalProps> = ({
   filters,
   activePreset,
   isRealtimeActive,
+  datasets = [],
+  activeDatasetId,
+  initialTargetDatasetId,
 }) => {
+  const [shareScope, setShareScope] = useState<'single' | 'bundle'>('single');
+  const [selectedDatasetId, setSelectedDatasetId] = useState<string>(
+    initialTargetDatasetId || activeDatasetId || datasets[0]?.id || ''
+  );
+
   const [includeFilters, setIncludeFilters] = useState<boolean>(true);
   const [includeTheme, setIncludeTheme] = useState<boolean>(true);
   const [includeRealtime, setIncludeRealtime] = useState<boolean>(true);
   const [copied, setCopied] = useState<boolean>(false);
   const [copiedJson, setCopiedJson] = useState<boolean>(false);
+  const [copiedEmbed, setCopiedEmbed] = useState<boolean>(false);
+
+  // Sync selectedDatasetId when modal opens or initial target changes
+  useEffect(() => {
+    if (initialTargetDatasetId) {
+      setSelectedDatasetId(initialTargetDatasetId);
+    } else if (activeDatasetId) {
+      setSelectedDatasetId(activeDatasetId);
+    }
+  }, [initialTargetDatasetId, activeDatasetId, isOpen]);
+
+  // Target dataset being shared
+  const targetDataset: ManagedDataset = useMemo(() => {
+    const found = datasets.find((d) => d.id === selectedDatasetId);
+    if (found) return found;
+
+    return {
+      id: selectedDatasetId || `ds_${Date.now()}`,
+      name: datasetName,
+      fileName,
+      records,
+      profile,
+      dashboards: [],
+      activeDashboardId: '',
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+      isCustomUpload,
+      sampleId,
+    };
+  }, [datasets, selectedDatasetId, datasetName, fileName, records, profile, isCustomUpload, sampleId]);
 
   // Deterministic share ID based on dataset metadata
   const shareId = useMemo(() => {
-    const cleanName = (datasetName || 'data').replace(/[^a-zA-Z0-9]/g, '_').toLowerCase();
+    const ds = targetDataset;
+    const cleanName = (ds.name || 'data').replace(/[^a-zA-Z0-9]/g, '_').toLowerCase();
     const hash = Math.abs(
-      (datasetName + fileName + records.length + (profile.primaryMetricKey || '')).split('').reduce((a, b) => ((a << 5) - a) + b.charCodeAt(0), 0)
+      (ds.name + ds.fileName + ds.records.length + (ds.profile.primaryMetricKey || '')).split('').reduce((a, b) => ((a << 5) - a) + b.charCodeAt(0), 0)
     ).toString(36);
     return `${cleanName}_${hash}`;
-  }, [datasetName, fileName, records.length, profile.primaryMetricKey]);
+  }, [targetDataset]);
 
   // Persist dataset snapshot to shared cache whenever modal opens or data changes
   useEffect(() => {
-    if (isOpen && records.length > 0 && profile) {
-      saveSharedDataset(shareId, records, profile, datasetName, fileName);
-      saveActiveCustomDataset(records, profile, datasetName, fileName);
+    if (isOpen && targetDataset.records.length > 0 && targetDataset.profile) {
+      saveSharedDataset(shareId, targetDataset.records, targetDataset.profile, targetDataset.name, targetDataset.fileName);
     }
-  }, [isOpen, shareId, records, profile, datasetName, fileName]);
+  }, [isOpen, shareId, targetDataset]);
 
-  // Compute shareable URL synchronously so it is never empty or delayed
+  // Compute shareable URL
   const generatedUrl = useMemo(() => {
     if (typeof window === 'undefined') return '';
 
@@ -86,23 +135,35 @@ export const ShareDashboardModal: React.FC<ShareDashboardModalProps> = ({
       const url = new URL(window.location.origin + window.location.pathname);
       url.searchParams.set('shared', 'true');
       url.searchParams.set('view', 'dashboard');
-      url.searchParams.set('sid', shareId);
 
-      // Embed compressed snapshot
-      const compressed = encodeDatasetToCompressedString(records, profile, datasetName, fileName);
-      if (compressed) {
-        url.hash = `data=${compressed}`;
-        // If data payload is compact, also embed in query parameter for maximum URL compatibility
-        if (compressed.length < 1800) {
-          url.searchParams.set('data', compressed);
+      if (shareScope === 'bundle' && datasets.length > 1) {
+        // Multi-dataset bundle sharing
+        url.searchParams.set('scope', 'bundle');
+        const compressedBundle = encodeMultiDatasetBundle(datasets, selectedDatasetId || activeDatasetId || datasets[0].id);
+        if (compressedBundle) {
+          url.hash = `bundle=${compressedBundle}`;
+          if (compressedBundle.length < 1800) {
+            url.searchParams.set('bundle', compressedBundle);
+          }
         }
-      }
-
-      // If unmodified sample dataset, provide sample param; if custom upload, ensure sample is removed
-      if (sampleId && !isCustomUpload) {
-        url.searchParams.set('sample', sampleId);
       } else {
-        url.searchParams.delete('sample');
+        // Single separate dataset sharing
+        url.searchParams.set('sid', shareId);
+        url.searchParams.set('ds', targetDataset.id);
+
+        const compressed = encodeDatasetWithDashboards(targetDataset) || 
+          encodeDatasetToCompressedString(targetDataset.records, targetDataset.profile, targetDataset.name, targetDataset.fileName);
+
+        if (compressed) {
+          url.hash = `data=${compressed}`;
+          if (compressed.length < 1800) {
+            url.searchParams.set('data', compressed);
+          }
+        }
+
+        if (targetDataset.sampleId && !targetDataset.isCustomUpload) {
+          url.searchParams.set('sample', targetDataset.sampleId);
+        }
       }
 
       if (includeTheme && themeId) {
@@ -120,7 +181,6 @@ export const ShareDashboardModal: React.FC<ShareDashboardModalProps> = ({
         if (filters?.searchQuery?.trim()) {
           url.searchParams.set('q', filters.searchQuery.trim());
         }
-        // If categorical filters or numeric ranges are active, encode them
         const hasCat = Object.keys(filters?.categoricalFilters || {}).some(
           (k) => filters.categoricalFilters[k] && filters.categoricalFilters[k].length > 0
         );
@@ -143,19 +203,18 @@ export const ShareDashboardModal: React.FC<ShareDashboardModalProps> = ({
       return typeof window !== 'undefined' ? window.location.href : '';
     }
   }, [
+    shareScope,
+    datasets,
+    targetDataset,
     shareId,
-    sampleId, 
-    isCustomUpload,
-    records, 
-    profile, 
-    datasetName, 
-    fileName, 
-    themeId, 
-    includeTheme, 
-    includeRealtime, 
-    isRealtimeActive, 
-    includeFilters, 
-    activePreset, 
+    selectedDatasetId,
+    activeDatasetId,
+    themeId,
+    includeTheme,
+    includeRealtime,
+    isRealtimeActive,
+    includeFilters,
+    activePreset,
     filters
   ]);
 
@@ -172,7 +231,7 @@ export const ShareDashboardModal: React.FC<ShareDashboardModalProps> = ({
         return;
       }
     } catch {
-      // Fallback to select & execCommand
+      // Fallback
     }
 
     const input = document.getElementById('share-url-input') as HTMLInputElement;
@@ -185,17 +244,27 @@ export const ShareDashboardModal: React.FC<ShareDashboardModalProps> = ({
     }
   };
 
+  const handleCopyEmbed = async () => {
+    const embedCode = `<iframe src="${generatedUrl}" width="100%" height="800" frameborder="0" style="border-radius: 16px; box-shadow: 0 4px 20px rgba(0,0,0,0.1);"></iframe>`;
+    try {
+      if (navigator?.clipboard?.writeText) {
+        await navigator.clipboard.writeText(embedCode);
+        setCopiedEmbed(true);
+        setTimeout(() => setCopiedEmbed(false), 3000);
+      }
+    } catch (e) {
+      console.warn('Could not copy embed code:', e);
+    }
+  };
+
   const handleCopyJson = async () => {
     try {
       const payload = {
-        name: datasetName,
-        fileName,
-        profile: {
-          primaryDimension: profile.primaryDimensionKey,
-          primaryMetric: profile.primaryMetricKey,
-          columns: profile.columns.map((c) => ({ key: c.key, name: c.name, type: c.type })),
-        },
-        records,
+        name: targetDataset.name,
+        fileName: targetDataset.fileName,
+        profile: targetDataset.profile,
+        dashboards: targetDataset.dashboards,
+        records: targetDataset.records,
       };
       const text = JSON.stringify(payload, null, 2);
       if (navigator?.clipboard?.writeText) {
@@ -209,13 +278,13 @@ export const ShareDashboardModal: React.FC<ShareDashboardModalProps> = ({
   };
 
   const handleDownloadCsv = () => {
-    exportUniversalCSV(records, profile, fileName || `${datasetName.toLowerCase().replace(/\s+/g, '_')}.csv`);
+    exportUniversalCSV(targetDataset.records, targetDataset.profile, `${targetDataset.name.toLowerCase().replace(/\s+/g, '_')}.csv`);
   };
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/75 backdrop-blur-sm animate-fadeIn">
       <div
-        className="w-full max-w-lg rounded-2xl border shadow-2xl overflow-hidden transition-all duration-300"
+        className="w-full max-w-xl rounded-2xl border shadow-2xl overflow-hidden transition-all duration-300 flex flex-col max-h-[90vh]"
         style={{
           backgroundColor: theme.bgCard,
           borderColor: theme.borderCard,
@@ -237,10 +306,10 @@ export const ShareDashboardModal: React.FC<ShareDashboardModalProps> = ({
             </div>
             <div>
               <h3 className="text-base font-bold" style={{ color: theme.textPrimary }}>
-                Share Live Dashboard
+                Share Separate Dataset Dashboard
               </h3>
               <p className="text-xs" style={{ color: theme.textMuted }}>
-                Generate a live, interactive link for stakeholders and team members
+                Generate distinct standalone URLs for individual datasets or bundle the whole workspace
               </p>
             </div>
           </div>
@@ -255,7 +324,80 @@ export const ShareDashboardModal: React.FC<ShareDashboardModalProps> = ({
         </div>
 
         {/* Content Body */}
-        <div className="p-5 space-y-4 max-h-[80vh] overflow-y-auto">
+        <div className="p-5 space-y-4 overflow-y-auto flex-1">
+          {/* Share Scope Selector (Single Dataset vs All Datasets Bundle) */}
+          {datasets.length > 1 && (
+            <div className="space-y-1.5">
+              <label className="text-xs font-bold" style={{ color: theme.textSecondary }}>
+                Share Scope
+              </label>
+              <div className="grid grid-cols-2 gap-2">
+                <button
+                  onClick={() => setShareScope('single')}
+                  className={`p-3 rounded-xl border text-left text-xs transition cursor-pointer ${
+                    shareScope === 'single' ? 'shadow-xs' : 'opacity-70 hover:opacity-100'
+                  }`}
+                  style={{
+                    backgroundColor: shareScope === 'single' ? theme.bgBadge : theme.bgInput,
+                    borderColor: shareScope === 'single' ? theme.accentPrimary : theme.borderSubtle,
+                  }}
+                >
+                  <div className="flex items-center space-x-2">
+                    <Database className="w-4 h-4" style={{ color: theme.accentPrimary }} />
+                    <span className="font-bold" style={{ color: theme.textPrimary }}>Single Dataset</span>
+                  </div>
+                  <p className="text-[11px] mt-1" style={{ color: theme.textSecondary }}>
+                    Share standalone dashboards for one chosen dataset
+                  </p>
+                </button>
+
+                <button
+                  onClick={() => setShareScope('bundle')}
+                  className={`p-3 rounded-xl border text-left text-xs transition cursor-pointer ${
+                    shareScope === 'bundle' ? 'shadow-xs' : 'opacity-70 hover:opacity-100'
+                  }`}
+                  style={{
+                    backgroundColor: shareScope === 'bundle' ? theme.bgBadge : theme.bgInput,
+                    borderColor: shareScope === 'bundle' ? theme.accentPrimary : theme.borderSubtle,
+                  }}
+                >
+                  <div className="flex items-center space-x-2">
+                    <FolderKanban className="w-4 h-4" style={{ color: theme.accentPrimary }} />
+                    <span className="font-bold" style={{ color: theme.textPrimary }}>All Datasets ({datasets.length})</span>
+                  </div>
+                  <p className="text-[11px] mt-1" style={{ color: theme.textSecondary }}>
+                    Share entire workspace with dataset switcher
+                  </p>
+                </button>
+              </div>
+            </div>
+          )}
+
+          {/* Dataset Dropdown / Target Selector */}
+          {shareScope === 'single' && datasets.length > 1 && (
+            <div className="space-y-1.5">
+              <label className="text-xs font-bold" style={{ color: theme.textSecondary }}>
+                Select Dataset to Share Separately:
+              </label>
+              <select
+                value={selectedDatasetId}
+                onChange={(e) => setSelectedDatasetId(e.target.value)}
+                className="w-full p-2.5 rounded-xl border text-xs font-semibold focus:outline-none cursor-pointer"
+                style={{
+                  backgroundColor: theme.bgInput,
+                  borderColor: theme.borderSubtle,
+                  color: theme.textPrimary,
+                }}
+              >
+                {datasets.map((ds) => (
+                  <option key={ds.id} value={ds.id}>
+                    {ds.name} ({ds.records.length} records &bull; {ds.dashboards?.length || 1} dashboards)
+                  </option>
+                ))}
+              </select>
+            </div>
+          )}
+
           {/* Active Dataset Overview Badge */}
           <div
             className="p-3 rounded-xl border flex items-center justify-between text-xs"
@@ -269,17 +411,20 @@ export const ShareDashboardModal: React.FC<ShareDashboardModalProps> = ({
                 className="p-1.5 rounded-lg shrink-0"
                 style={{
                   backgroundColor: theme.bgBadge,
-                  color: isCustomUpload ? '#10B981' : theme.accentPrimary,
+                  color: theme.accentPrimary,
                 }}
               >
-                {isCustomUpload ? <FileSpreadsheet className="w-4 h-4" /> : <Database className="w-4 h-4" />}
+                <Database className="w-4 h-4" />
               </div>
               <div className="min-w-0">
                 <span className="font-bold block truncate" style={{ color: theme.textPrimary }}>
-                  {datasetName}
+                  {shareScope === 'bundle' ? `Full Workspace (${datasets.length} Datasets)` : targetDataset.name}
                 </span>
                 <span className="text-[11px] font-mono block truncate" style={{ color: theme.textSecondary }}>
-                  {fileName} • {records.length} records • {profile.columns.length} columns
+                  {shareScope === 'bundle' 
+                    ? `${datasets.reduce((acc, d) => acc + d.records.length, 0)} total records across ${datasets.length} datasets`
+                    : `${targetDataset.fileName} • ${targetDataset.records.length} records • ${targetDataset.profile.columns.length} columns • ${targetDataset.dashboards?.length || 1} dashboards`
+                  }
                 </span>
               </div>
             </div>
@@ -287,11 +432,11 @@ export const ShareDashboardModal: React.FC<ShareDashboardModalProps> = ({
               className="text-[10px] font-bold px-2 py-0.5 rounded-full border shrink-0"
               style={{
                 backgroundColor: theme.bgBadge,
-                color: isCustomUpload ? '#10B981' : theme.accentPrimary,
+                color: theme.accentPrimary,
                 borderColor: theme.borderSubtle,
               }}
             >
-              {isCustomUpload ? 'Self-Contained' : 'Preloaded Sample'}
+              {shareScope === 'bundle' ? 'Workspace Bundle' : 'Separate Dashboard'}
             </span>
           </div>
 
@@ -303,7 +448,7 @@ export const ShareDashboardModal: React.FC<ShareDashboardModalProps> = ({
                 Shareable Dashboard URL
               </span>
               <span className="text-[11px] font-mono font-normal" style={{ color: theme.accentSecondary }}>
-                {isCustomUpload ? 'Complete Dataset in Link Hash' : 'Interactive URL'}
+                Separate Standalone Link
               </span>
             </label>
             <div
@@ -344,7 +489,7 @@ export const ShareDashboardModal: React.FC<ShareDashboardModalProps> = ({
             </div>
             {copied && (
               <p className="text-[11px] font-semibold text-emerald-500 animate-fadeIn flex items-center gap-1">
-                <Check className="w-3 h-3" /> Link copied to clipboard! Ready to paste and share with anyone.
+                <Check className="w-3 h-3" /> Link copied to clipboard! Ready to send to stakeholders.
               </p>
             )}
           </div>
@@ -385,7 +530,7 @@ export const ShareDashboardModal: React.FC<ShareDashboardModalProps> = ({
               <div className="flex items-center space-x-2">
                 <Palette className="w-3.5 h-3.5" style={{ color: theme.accentPrimary }} />
                 <div>
-                  <span className="font-semibold block" style={{ color: theme.textPrimary }}>Preserve Theme Styling</span>
+                  <span className="font-semibold block" style={{ color: theme.textPrimary }}>Preserve Theme Palette</span>
                   <span className="text-[11px]" style={{ color: theme.textMuted }}>
                     Loads in "{theme.name}" palette
                   </span>
@@ -433,10 +578,23 @@ export const ShareDashboardModal: React.FC<ShareDashboardModalProps> = ({
             <div className="flex items-center space-x-2">
               <Code className="w-3.5 h-3.5" style={{ color: theme.accentPrimary }} />
               <span className="font-semibold" style={{ color: theme.textSecondary }}>
-                Data Snapshot Tools:
+                Export & Embed:
               </span>
             </div>
             <div className="flex items-center space-x-2">
+              <button
+                onClick={handleCopyEmbed}
+                className="px-2.5 py-1 rounded-lg text-xs font-semibold border transition cursor-pointer hover:opacity-80 flex items-center space-x-1"
+                style={{
+                  backgroundColor: theme.bgBadge,
+                  borderColor: theme.borderSubtle,
+                  color: theme.textPrimary,
+                }}
+                title="Copy iframe embed snippet"
+              >
+                {copiedEmbed ? <Check className="w-3 h-3 text-emerald-500" /> : <Code className="w-3 h-3" />}
+                <span>{copiedEmbed ? 'Embed Copied!' : 'Embed iFrame'}</span>
+              </button>
               <button
                 onClick={handleCopyJson}
                 className="px-2.5 py-1 rounded-lg text-xs font-semibold border transition cursor-pointer hover:opacity-80 flex items-center space-x-1"
@@ -445,7 +603,7 @@ export const ShareDashboardModal: React.FC<ShareDashboardModalProps> = ({
                   borderColor: theme.borderSubtle,
                   color: theme.textPrimary,
                 }}
-                title="Copy entire dataset structure as JSON"
+                title="Copy dataset structure as JSON"
               >
                 {copiedJson ? <Check className="w-3 h-3 text-emerald-500" /> : <Copy className="w-3 h-3" />}
                 <span>{copiedJson ? 'JSON Copied!' : 'Copy JSON'}</span>
@@ -458,33 +616,11 @@ export const ShareDashboardModal: React.FC<ShareDashboardModalProps> = ({
                   borderColor: theme.borderSubtle,
                   color: theme.textPrimary,
                 }}
-                title="Download active records as CSV"
+                title="Download records as CSV"
               >
                 <Download className="w-3 h-3 text-emerald-500" />
                 <span>Export CSV</span>
               </button>
-            </div>
-          </div>
-
-          {/* Recipient Experience info card */}
-          <div
-            className="p-3 rounded-xl border flex items-start space-x-2.5 text-xs"
-            style={{
-              backgroundColor: theme.bgBadge,
-              borderColor: theme.borderSubtle,
-            }}
-          >
-            <Eye className="w-4 h-4 shrink-0 mt-0.5" style={{ color: theme.accentPrimary }} />
-            <div>
-              <span className="font-bold block" style={{ color: theme.textPrimary }}>
-                {isCustomUpload ? 'Self-Contained Data Snapshot' : 'Live Dashboard Experience'}
-              </span>
-              <p className="text-[11px] mt-0.5" style={{ color: theme.textSecondary }}>
-                {isCustomUpload 
-                  ? 'Recipients receive the complete uploaded dataset, calculated metrics, KPIs, and all visual charts with full interactivity.'
-                  : 'Recipients get a clean, presentation-ready live dashboard showcasing Executive KPIs, dynamic categorical & numeric filters, and responsive charts.'
-                }
-              </p>
             </div>
           </div>
         </div>
@@ -492,7 +628,6 @@ export const ShareDashboardModal: React.FC<ShareDashboardModalProps> = ({
         {/* Footer Actions */}
         <div className="p-4 border-t flex flex-wrap items-center justify-between gap-2" style={{ borderColor: theme.borderSubtle }}>
           <div className="flex items-center space-x-2">
-            {/* Native Link to bypass popup blockers */}
             <a
               id="test-share-link-tab"
               href={generatedUrl}
@@ -523,4 +658,3 @@ export const ShareDashboardModal: React.FC<ShareDashboardModalProps> = ({
     </div>
   );
 };
-

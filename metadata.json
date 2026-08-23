@@ -1,6 +1,6 @@
 {
   "name": "Universal Data Profiler, SQLite & Multi-Theme Showcase Dashboard",
-  "description": "Universal dataset schema profiler with automatic data check verification, multi-dashboard simultaneous generator (Executive, Metrics, Breakdowns, Trends, Operations), in-browser SQLite database engine, multi-theme visual showcase, and shareable live dashboard views.",
+  "description": "Universal dataset schema profiler with automatic data check verification, multi-dashboard simultaneous generator, multi-dataset management workspace, separate dataset sharing & full workspace bundle sharing, in-browser SQLite database engine, and multi-theme visual showcase.",
   "requestFramePermissions": [],
   "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
 }

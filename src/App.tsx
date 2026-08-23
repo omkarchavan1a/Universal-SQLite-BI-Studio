@@ -13,20 +13,24 @@ import { ShareDashboardModal } from './components/ShareDashboardModal';
 import { DashboardTabBar } from './components/DashboardTabBar';
 import { DataCheckModal } from './components/DataCheckModal';
 import { DashboardConfigModal } from './components/DashboardConfigModal';
+import { DatasetSwitcherBar } from './components/DatasetSwitcherBar';
+import { DatasetsManagerModal } from './components/DatasetsManagerModal';
 import { 
   DatasetProfile, 
   GenericRecord, 
   UniversalFilterState, 
   UpdateEvent,
-  DashboardConfig 
+  DashboardConfig,
+  ManagedDataset,
 } from './types';
 import { 
   profileDataset, 
   parseUploadedFile, 
+  parseUniversalFile,
   formatMetricValue 
 } from './utils/universalParser';
 import { getDefaultDashboards } from './utils/dashboardGenerator';
-import { sampleDatasets } from './data/sampleDatasets';
+import { sampleDatasets, SAMPLE_DATASETS, getSampleDataset } from './data/sampleDatasets';
 import { exportUniversalCSV } from './utils/universalExcelEngine';
 import { 
   createSqliteDatabase, 
@@ -46,7 +50,11 @@ import {
   clearActiveCustomDataset,
   saveSharedDataset,
   loadSharedDataset,
-  extractDataPayload
+  extractDataPayload,
+  saveAllManagedDatasets,
+  loadAllManagedDatasets,
+  decodeMultiDatasetBundle,
+  encodeDatasetWithDashboards,
 } from './utils/datasetStorage';
 import { 
   Activity, 
@@ -61,28 +69,39 @@ import {
   Share2,
   ExternalLink,
   BarChart3,
+  FolderKanban,
 } from 'lucide-react';
 
 /**
- * Resolves the initial dataset state from URL compressed hash/params, share ID, or local storage
+ * Initializes the list of managed datasets from URL payload, registry, or built-in samples
  */
-function resolveInitialDataset(): {
-  records: GenericRecord[];
-  profile: DatasetProfile;
-  datasetName: string;
-  fileName: string;
-  sampleIndex: number;
+function resolveInitialWorkspace(): {
+  datasets: ManagedDataset[];
+  activeDatasetId: string;
   isShared: boolean;
 } {
   const defaultSample = sampleDatasets[0];
+  const defaultProfile = profileDataset(defaultSample.records, defaultSample.name);
+  const defaultDashboards = getDefaultDashboards(defaultProfile, defaultSample.records);
+
+  const fallbackManaged: ManagedDataset = {
+    id: `ds_sample_${defaultSample.id}`,
+    name: defaultSample.name,
+    fileName: defaultSample.fileName,
+    category: defaultSample.category,
+    records: defaultSample.records,
+    profile: defaultProfile,
+    dashboards: defaultDashboards,
+    activeDashboardId: defaultDashboards[0]?.id || `dash_${Date.now()}`,
+    createdAt: Date.now(),
+    updatedAt: Date.now(),
+    sampleId: defaultSample.id,
+  };
 
   if (typeof window === 'undefined') {
     return {
-      records: defaultSample.records,
-      profile: profileDataset(defaultSample.records, defaultSample.name),
-      datasetName: defaultSample.name,
-      fileName: defaultSample.fileName,
-      sampleIndex: 0,
+      datasets: [fallbackManaged],
+      activeDatasetId: fallbackManaged.id,
       isShared: false,
     };
   }
@@ -94,59 +113,101 @@ function resolveInitialDataset(): {
     urlParams.get('shared') === 'true' || 
     urlParams.get('mode') === 'dashboard' || 
     urlParams.get('view') === 'dashboard' ||
+    hash.includes('bundle=') ||
     hash.includes('data=') ||
     fullHref.includes('data=') ||
     !!urlParams.get('sid');
 
-  // 1. Check for URL Hash or Query compressed payload (#data=... or ?data=...)
-  const rawPayload = extractDataPayload(hash) || extractDataPayload(urlParams.get('data') || '') || extractDataPayload(urlParams.get('payload') || '') || extractDataPayload(fullHref);
-  if (rawPayload) {
-    const decoded = decodeDatasetFromCompressedString(rawPayload);
-    if (decoded && decoded.records && decoded.records.length > 0) {
-      // Save locally so refreshes persist
-      saveActiveCustomDataset(decoded.records, decoded.profile, decoded.datasetName, decoded.fileName);
+  // 1. Check for Multi-dataset bundle in hash or query
+  const rawBundle = extractDataPayload(hash) || extractDataPayload(urlParams.get('bundle') || '');
+  if (rawBundle && (hash.includes('bundle=') || urlParams.get('bundle') || urlParams.get('scope') === 'bundle')) {
+    const decodedBundle = decodeMultiDatasetBundle(rawBundle);
+    if (decodedBundle && decodedBundle.datasets && decodedBundle.datasets.length > 0) {
+      saveAllManagedDatasets(decodedBundle.datasets, decodedBundle.activeDatasetId);
       return {
-        records: decoded.records,
-        profile: decoded.profile,
-        datasetName: decoded.datasetName,
-        fileName: decoded.fileName,
-        sampleIndex: -1,
+        datasets: decodedBundle.datasets,
+        activeDatasetId: decodedBundle.activeDatasetId,
         isShared: true,
       };
     }
   }
 
-  // 2. Check for Shared Dataset ID (?sid=...) in shared storage cache
+  // 2. Check for Single Dataset in hash/query data
+  const rawPayload = extractDataPayload(hash) || extractDataPayload(urlParams.get('data') || '') || extractDataPayload(urlParams.get('payload') || '') || extractDataPayload(fullHref);
+  if (rawPayload) {
+    const decodedBundle = decodeMultiDatasetBundle(rawPayload);
+    if (decodedBundle && decodedBundle.datasets && decodedBundle.datasets.length > 0) {
+      saveAllManagedDatasets(decodedBundle.datasets, decodedBundle.activeDatasetId);
+      return {
+        datasets: decodedBundle.datasets,
+        activeDatasetId: decodedBundle.activeDatasetId,
+        isShared: true,
+      };
+    }
+
+    const decoded = decodeDatasetFromCompressedString(rawPayload);
+    if (decoded && decoded.records && decoded.records.length > 0) {
+      const singleDashboards = getDefaultDashboards(decoded.profile, decoded.records);
+      const singleManaged: ManagedDataset = {
+        id: `ds_shared_${Date.now()}`,
+        name: decoded.datasetName,
+        fileName: decoded.fileName,
+        records: decoded.records,
+        profile: decoded.profile,
+        dashboards: singleDashboards,
+        activeDashboardId: singleDashboards[0]?.id || `dash_${Date.now()}`,
+        createdAt: Date.now(),
+        updatedAt: Date.now(),
+        isCustomUpload: true,
+      };
+      saveAllManagedDatasets([singleManaged], singleManaged.id);
+      return {
+        datasets: [singleManaged],
+        activeDatasetId: singleManaged.id,
+        isShared: true,
+      };
+    }
+  }
+
+  // 3. Check for Shared Dataset ID (?sid=...)
   const sidParam = urlParams.get('sid');
   if (sidParam) {
     const sharedData = loadSharedDataset(sidParam);
     if (sharedData && sharedData.records && sharedData.records.length > 0) {
-      saveActiveCustomDataset(sharedData.records, sharedData.profile, sharedData.datasetName, sharedData.fileName);
-      return {
+      const singleDashboards = getDefaultDashboards(sharedData.profile, sharedData.records);
+      const singleManaged: ManagedDataset = {
+        id: `ds_sid_${sidParam}`,
+        name: sharedData.datasetName,
+        fileName: sharedData.fileName,
         records: sharedData.records,
         profile: sharedData.profile,
-        datasetName: sharedData.datasetName,
-        fileName: sharedData.fileName,
-        sampleIndex: -1,
+        dashboards: singleDashboards,
+        activeDashboardId: singleDashboards[0]?.id || `dash_${Date.now()}`,
+        createdAt: Date.now(),
+        updatedAt: Date.now(),
+        isCustomUpload: true,
+        shareId: sidParam,
+      };
+      saveAllManagedDatasets([singleManaged], singleManaged.id);
+      return {
+        datasets: [singleManaged],
+        activeDatasetId: singleManaged.id,
         isShared: true,
       };
     }
   }
 
-  // 3. If in Shared Mode or without sample param, check active custom uploaded dataset from storage
-  const activeCustom = loadActiveCustomDataset();
-  if (activeCustom && activeCustom.records && activeCustom.records.length > 0 && (isShared || !urlParams.get('sample'))) {
+  // 4. Check for saved workspace in localStorage
+  const savedWorkspace = loadAllManagedDatasets();
+  if (savedWorkspace && savedWorkspace.datasets && savedWorkspace.datasets.length > 0 && !urlParams.get('sample')) {
     return {
-      records: activeCustom.records,
-      profile: activeCustom.profile,
-      datasetName: activeCustom.datasetName,
-      fileName: activeCustom.fileName,
-      sampleIndex: -1,
+      datasets: savedWorkspace.datasets,
+      activeDatasetId: savedWorkspace.activeDatasetId,
       isShared: isShared,
     };
   }
 
-  // 4. Check for explicit ?sample=... param (by id, name, or index) ONLY if not in shared mode with custom data
+  // 5. Check for explicit ?sample=... param
   const sampleParam = urlParams.get('sample');
   if (sampleParam && !isShared) {
     const cleanParam = sampleParam.toLowerCase().trim();
@@ -161,42 +222,57 @@ function resolveInitialDataset(): {
     }
     if (idx !== -1) {
       const sample = sampleDatasets[idx];
-      return {
-        records: sample.records,
-        profile: profileDataset(sample.records, sample.name),
-        datasetName: sample.name,
+      const sProfile = profileDataset(sample.records, sample.name);
+      const sDashboards = getDefaultDashboards(sProfile, sample.records);
+      const sManaged: ManagedDataset = {
+        id: `ds_sample_${sample.id}`,
+        name: sample.name,
         fileName: sample.fileName,
-        sampleIndex: idx,
-        isShared,
+        category: sample.category,
+        records: sample.records,
+        profile: sProfile,
+        dashboards: sDashboards,
+        activeDashboardId: sDashboards[0]?.id || `dash_${Date.now()}`,
+        createdAt: Date.now(),
+        updatedAt: Date.now(),
+        sampleId: sample.id,
+      };
+      return {
+        datasets: [sManaged],
+        activeDatasetId: sManaged.id,
+        isShared: false,
       };
     }
   }
 
-  // 5. Check if any active custom dataset is saved in standard mode
-  if (activeCustom && activeCustom.records && activeCustom.records.length > 0) {
+  // 6. Default: Pre-populate with initial curated datasets (E-Commerce + SaaS + Logistics)
+  const initialDatasets: ManagedDataset[] = sampleDatasets.slice(0, 3).map((sample) => {
+    const sProf = profileDataset(sample.records, sample.name);
+    const sDash = getDefaultDashboards(sProf, sample.records);
     return {
-      records: activeCustom.records,
-      profile: activeCustom.profile,
-      datasetName: activeCustom.datasetName,
-      fileName: activeCustom.fileName,
-      sampleIndex: -1,
-      isShared: false,
+      id: `ds_sample_${sample.id}`,
+      name: sample.name,
+      fileName: sample.fileName,
+      category: sample.category,
+      records: sample.records,
+      profile: sProf,
+      dashboards: sDash,
+      activeDashboardId: sDash[0]?.id || `dash_${Date.now()}`,
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+      sampleId: sample.id,
     };
-  }
+  });
 
-  // 6. Default fallback sample
   return {
-    records: defaultSample.records,
-    profile: profileDataset(defaultSample.records, defaultSample.name),
-    datasetName: defaultSample.name,
-    fileName: defaultSample.fileName,
-    sampleIndex: 0,
-    isShared,
+    datasets: initialDatasets,
+    activeDatasetId: initialDatasets[0].id,
+    isShared: false,
   };
 }
 
 export default function App() {
-  const initialResolved = useMemo(() => resolveInitialDataset(), []);
+  const initialResolved = useMemo(() => resolveInitialWorkspace(), []);
 
   // 0. URL parameters detection for Shared Dashboard View
   const [isSharedMode, setIsSharedMode] = useState<boolean>(() => {
@@ -205,15 +281,29 @@ export default function App() {
     return params.get('shared') === 'true' || params.get('mode') === 'dashboard' || initialResolved.isShared;
   });
   const [isShareModalOpen, setIsShareModalOpen] = useState<boolean>(false);
+  const [targetShareDatasetId, setTargetShareDatasetId] = useState<string | undefined>(undefined);
 
-  // 1. Dataset State
-  const [currentSampleIndex, setCurrentSampleIndex] = useState<number>(initialResolved.sampleIndex);
-  const [records, setRecords] = useState<GenericRecord[]>(initialResolved.records);
-  const [datasetName, setDatasetName] = useState<string>(initialResolved.datasetName);
-  const [fileName, setFileName] = useState<string>(initialResolved.fileName);
-  
-  // Profile state for the active dataset
-  const [profile, setProfile] = useState<DatasetProfile>(initialResolved.profile);
+  // Multi-Dataset Workspace State
+  const [datasets, setDatasets] = useState<ManagedDataset[]>(initialResolved.datasets);
+  const [activeDatasetId, setActiveDatasetId] = useState<string>(initialResolved.activeDatasetId);
+  const [isDatasetsManagerOpen, setIsDatasetsManagerOpen] = useState<boolean>(false);
+
+  // Active dataset reference
+  const currentDataset = useMemo(() => {
+    return datasets.find((d) => d.id === activeDatasetId) || datasets[0];
+  }, [datasets, activeDatasetId]);
+
+  // Derived current dataset active states
+  const records = currentDataset.records;
+  const profile = currentDataset.profile;
+  const datasetName = currentDataset.name;
+  const fileName = currentDataset.fileName;
+  const dashboards = currentDataset.dashboards || [];
+  const activeDashboardId = currentDataset.activeDashboardId || dashboards[0]?.id || '';
+
+  const activeDashboard = useMemo(() => {
+    return dashboards.find((d) => d.id === activeDashboardId) || dashboards[0];
+  }, [dashboards, activeDashboardId]);
 
   // Active Main View ('schema' | 'dashboard' | 'table' | 'sqlite')
   const [activeView, setActiveView] = useState<'schema' | 'dashboard' | 'table' | 'sqlite'>('dashboard');
@@ -229,7 +319,7 @@ export default function App() {
       const savedTheme = localStorage.getItem('universal_studio_theme') as ThemeId;
       if (savedTheme && THEMES[savedTheme]) return savedTheme;
     } catch {
-      // Ignore localStorage access errors
+      // Ignore
     }
     return 'berry_noir';
   });
@@ -241,7 +331,7 @@ export default function App() {
     try {
       localStorage.setItem('universal_studio_theme', currentThemeId);
     } catch {
-      // Ignore storage errors in sandboxed iframes
+      // Ignore
     }
 
     if (typeof window !== 'undefined') {
@@ -252,6 +342,13 @@ export default function App() {
       }
     }
   }, [currentThemeId]);
+
+  // Save workspace changes to local/session registry
+  useEffect(() => {
+    if (datasets.length > 0) {
+      saveAllManagedDatasets(datasets, activeDatasetId);
+    }
+  }, [datasets, activeDatasetId]);
 
   // SQLite Database State
   const [sqliteState, setSqliteState] = useState<SqliteState | null>(null);
@@ -276,20 +373,10 @@ export default function App() {
   const [isLogDrawerOpen, setIsLogDrawerOpen] = useState<boolean>(false);
   const [notification, setNotification] = useState<{ message: string; type: 'success' | 'info' } | null>(null);
 
-  // Multi-Dashboard Management State
-  const [dashboards, setDashboards] = useState<DashboardConfig[]>(() =>
-    getDefaultDashboards(initialResolved.profile, initialResolved.records)
-  );
-  const [activeDashboardId, setActiveDashboardId] = useState<string>(() =>
-    dashboards[0]?.id || `dash_exec_${Date.now()}`
-  );
+  // Modal configs
   const [isDataCheckModalOpen, setIsDataCheckModalOpen] = useState<boolean>(false);
   const [isDashboardConfigModalOpen, setIsDashboardConfigModalOpen] = useState<boolean>(false);
   const [dashboardToEdit, setDashboardToEdit] = useState<DashboardConfig | null>(null);
-
-  const activeDashboard = useMemo(() => {
-    return dashboards.find((d) => d.id === activeDashboardId) || dashboards[0];
-  }, [dashboards, activeDashboardId]);
 
   // Universal Filters
   const [filters, setFilters] = useState<UniversalFilterState>(() => {
@@ -355,82 +442,82 @@ export default function App() {
     };
   }, [records, profile]);
 
-  // Switch to a preloaded sample dataset
-  const handleSelectSample = (index: number) => {
-    const sample = sampleDatasets[index];
-    if (!sample) return;
-    clearActiveCustomDataset();
-    setCurrentSampleIndex(index);
-    setRecords(sample.records);
-    setDatasetName(sample.name);
-    setFileName(sample.fileName);
-    const newProfile = profileDataset(sample.records, sample.name);
-    setProfile(newProfile);
-    const newDashboards = getDefaultDashboards(newProfile, sample.records);
-    setDashboards(newDashboards);
-    setActiveDashboardId(newDashboards[0]?.id || `dash_exec_${Date.now()}`);
+  // Dataset switching handler
+  const handleSelectDataset = (datasetId: string) => {
+    const target = datasets.find((d) => d.id === datasetId);
+    if (!target) return;
+
+    setActiveDatasetId(datasetId);
     setFilters({ searchQuery: '', categoricalFilters: {}, numericRanges: {} });
     setActivePreset('All Records');
     setLastSyncTime(new Date());
     setUpdateCount(0);
-
-    // Clear data hash if present
-    if (typeof window !== 'undefined' && window.location.hash) {
-      window.history.replaceState({}, '', window.location.pathname + window.location.search);
-    }
-
-    showNotification(`Switched to "${sample.name}" dataset (${sample.records.length} records)`);
+    showNotification(`Switched active dataset to "${target.name}" (${target.records.length} records).`);
   };
 
-  // Handle uploaded custom file (CSV, XLSX, TSV, JSON)
+  // Switch to a preloaded sample dataset
+  const handleSelectSample = (index: number) => {
+    const sample = sampleDatasets[index];
+    if (!sample) return;
+
+    const sProf = profileDataset(sample.records, sample.name);
+    const sDash = getDefaultDashboards(sProf, sample.records);
+    const sampleDatasetId = `ds_sample_${sample.id}`;
+
+    setDatasets((prev) => {
+      const existsIndex = prev.findIndex((d) => d.id === sampleDatasetId || d.sampleId === sample.id);
+      if (existsIndex !== -1) {
+        return prev;
+      }
+      const newDataset: ManagedDataset = {
+        id: sampleDatasetId,
+        name: sample.name,
+        fileName: sample.fileName,
+        category: sample.category,
+        records: sample.records,
+        profile: sProf,
+        dashboards: sDash,
+        activeDashboardId: sDash[0]?.id || `dash_${Date.now()}`,
+        createdAt: Date.now(),
+        updatedAt: Date.now(),
+        sampleId: sample.id,
+      };
+      return [newDataset, ...prev];
+    });
+
+    setActiveDatasetId(sampleDatasetId);
+    setFilters({ searchQuery: '', categoricalFilters: {}, numericRanges: {} });
+    setActivePreset('All Records');
+    showNotification(`Loaded "${sample.name}" dataset with ${sDash.length} dashboards.`);
+  };
+
+  // Handle uploaded single custom file
   const handleUploadFile = async (file: File) => {
     try {
       const { records: parsedRecords, profile: parsedProfile, filename } = await parseUploadedFile(file);
-      setRecords(parsedRecords);
-      setProfile(parsedProfile);
-      setDatasetName(parsedProfile.name);
-      setFileName(filename);
-      setCurrentSampleIndex(-1); // Custom file loaded
+      const generatedDashboards = getDefaultDashboards(parsedProfile, parsedRecords);
+      const cleanName = filename.replace(/\.[^/.]+$/, '').replace(/[-_]/g, ' ');
+
+      const newDataset: ManagedDataset = {
+        id: `ds_upload_${Date.now()}`,
+        name: cleanName,
+        fileName: filename,
+        category: 'Uploaded Data',
+        records: parsedRecords,
+        profile: parsedProfile,
+        dashboards: generatedDashboards,
+        activeDashboardId: generatedDashboards[0]?.id || `dash_${Date.now()}`,
+        createdAt: Date.now(),
+        updatedAt: Date.now(),
+        isCustomUpload: true,
+      };
+
+      setDatasets((prev) => [newDataset, ...prev]);
+      setActiveDatasetId(newDataset.id);
       setFilters({ searchQuery: '', categoricalFilters: {}, numericRanges: {} });
       setActivePreset('All Records');
       setLastSyncTime(new Date());
       setUpdateCount(0);
-
-      // Auto-generate multiple tailored dashboards for this uploaded file
-      const generatedDashboards = getDefaultDashboards(parsedProfile, parsedRecords);
-      setDashboards(generatedDashboards);
-      setActiveDashboardId(generatedDashboards[0]?.id || `dash_exec_${Date.now()}`);
-
-      // Save to persistent storage so refreshes don't lose the file
-      saveActiveCustomDataset(parsedRecords, parsedProfile, parsedProfile.name, filename);
-
-      // Generate deterministic share ID and persist in shared cache
-      const cleanName = (parsedProfile.name || 'data').replace(/[^a-zA-Z0-9]/g, '_').toLowerCase();
-      const hash = Math.abs(
-        (parsedProfile.name + filename + parsedRecords.length + (parsedProfile.primaryMetricKey || '')).split('').reduce((a, b) => ((a << 5) - a) + b.charCodeAt(0), 0)
-      ).toString(36);
-      const generatedShareId = `${cleanName}_${hash}`;
-      saveSharedDataset(generatedShareId, parsedRecords, parsedProfile, parsedProfile.name, filename);
-
-      // Update URL without old sample parameter and set new data payload
-      if (typeof window !== 'undefined') {
-        try {
-          const currentUrl = new URL(window.location.href);
-          currentUrl.searchParams.delete('sample');
-          currentUrl.searchParams.set('view', 'dashboard');
-          currentUrl.searchParams.set('sid', generatedShareId);
-          const compressed = encodeDatasetToCompressedString(parsedRecords, parsedProfile, parsedProfile.name, filename);
-          if (compressed) {
-            currentUrl.hash = `data=${compressed}`;
-            if (compressed.length < 1800) {
-              currentUrl.searchParams.set('data', compressed);
-            }
-          }
-          window.history.replaceState({}, '', currentUrl.toString());
-        } catch {
-          // Ignore history state updates if blocked
-        }
-      }
 
       // Log event
       const newEvent: UpdateEvent = {
@@ -438,11 +525,10 @@ export default function App() {
         timestamp: new Date(),
         type: 'file_upload',
         recordId: 'FILE_UPLOAD',
-        description: `Imported "${filename}" (${parsedRecords.length} rows, ${parsedProfile.columns.length} columns detected). Generated ${generatedDashboards.length} dashboards.`,
+        description: `Imported "${filename}" (${parsedRecords.length} rows, ${parsedProfile.columns.length} columns). Created ${generatedDashboards.length} dashboards.`,
       };
       setEvents((prev) => [newEvent, ...prev]);
 
-      // Switch to dashboard view and trigger Data Check & Multi-Dashboard creation modal
       setActiveView('dashboard');
       setIsDataCheckModalOpen(true);
       showNotification(`File analyzed: ${parsedProfile.columns.length} columns & ${generatedDashboards.length} dashboards ready!`);
@@ -451,9 +537,107 @@ export default function App() {
     }
   };
 
-  // Multi-Dashboard Management Functions
+  // Batch upload multiple files simultaneously
+  const handleBatchUploadFiles = async (fileList: FileList | File[]) => {
+    const files = Array.from(fileList);
+    if (files.length === 0) return;
+
+    const newDatasets: ManagedDataset[] = [];
+    for (let i = 0; i < files.length; i++) {
+      const file = files[i];
+      try {
+        const { records: parsedRecords, profile: parsedProfile } = await parseUniversalFile(file);
+        const generatedDashboards = getDefaultDashboards(parsedProfile, parsedRecords);
+        const cleanName = file.name.replace(/\.[^/.]+$/, '').replace(/[-_]/g, ' ');
+
+        const managed: ManagedDataset = {
+          id: `ds_batch_${Date.now()}_${i}`,
+          name: cleanName,
+          fileName: file.name,
+          category: 'Batch Upload',
+          records: parsedRecords,
+          profile: parsedProfile,
+          dashboards: generatedDashboards,
+          activeDashboardId: generatedDashboards[0]?.id || `dash_${Date.now()}`,
+          createdAt: Date.now(),
+          updatedAt: Date.now(),
+          isCustomUpload: true,
+        };
+        newDatasets.push(managed);
+      } catch (err) {
+        console.error(`Error parsing ${file.name}:`, err);
+      }
+    }
+
+    if (newDatasets.length > 0) {
+      setDatasets((prev) => [...newDatasets, ...prev]);
+      setActiveDatasetId(newDatasets[0].id);
+      showNotification(`Successfully created ${newDatasets.length} datasets and all their dashboards!`);
+    }
+  };
+
+  // Add multiple datasets (from Manager Modal)
+  const handleAddMultipleDatasets = (newDatasets: ManagedDataset[]) => {
+    if (newDatasets.length > 0) {
+      setDatasets((prev) => [...newDatasets, ...prev]);
+      setActiveDatasetId(newDatasets[0].id);
+      showNotification(`Added ${newDatasets.length} dataset(s) to workspace.`);
+    }
+  };
+
+  // Add single dataset (from Sample Catalog in Manager Modal)
+  const handleAddDataset = (newDataset: ManagedDataset) => {
+    setDatasets((prev) => [newDataset, ...prev]);
+    setActiveDatasetId(newDataset.id);
+    showNotification(`Dataset "${newDataset.name}" added to workspace.`);
+  };
+
+  // Update existing dataset details
+  const handleUpdateDataset = (updated: ManagedDataset) => {
+    setDatasets((prev) => prev.map((d) => (d.id === updated.id ? updated : d)));
+    showNotification(`Dataset "${updated.name}" updated.`);
+  };
+
+  // Duplicate dataset
+  const handleDuplicateDataset = (ds: ManagedDataset) => {
+    const copyId = `ds_copy_${Date.now()}`;
+    const duplicated: ManagedDataset = {
+      ...ds,
+      id: copyId,
+      name: `${ds.name} (Copy)`,
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    };
+    setDatasets((prev) => [duplicated, ...prev]);
+    setActiveDatasetId(copyId);
+    showNotification(`Duplicated "${ds.name}" and all its dashboards.`);
+  };
+
+  // Delete dataset
+  const handleDeleteDataset = (datasetId: string) => {
+    if (datasets.length <= 1) {
+      showNotification('Cannot delete the only dataset in the workspace.');
+      return;
+    }
+    const remaining = datasets.filter((d) => d.id !== datasetId);
+    setDatasets(remaining);
+    if (activeDatasetId === datasetId) {
+      setActiveDatasetId(remaining[0].id);
+    }
+    showNotification('Dataset removed from workspace.');
+  };
+
+  // Trigger separate share modal for a specific dataset
+  const handleOpenShareModalForDataset = (ds: ManagedDataset) => {
+    setTargetShareDatasetId(ds.id);
+    setIsShareModalOpen(true);
+  };
+
+  // Dashboard Management for the active dataset
   const handleSelectDashboard = (id: string) => {
-    setActiveDashboardId(id);
+    setDatasets((prev) =>
+      prev.map((d) => (d.id === activeDatasetId ? { ...d, activeDashboardId: id } : d))
+    );
   };
 
   const handleOpenCreateDashboard = () => {
@@ -467,16 +651,25 @@ export default function App() {
   };
 
   const handleSaveDashboard = (savedDash: DashboardConfig) => {
-    setDashboards((prev) => {
-      const existsIndex = prev.findIndex((d) => d.id === savedDash.id);
-      if (existsIndex !== -1) {
-        const next = [...prev];
-        next[existsIndex] = savedDash;
-        return next;
-      }
-      return [...prev, savedDash];
-    });
-    setActiveDashboardId(savedDash.id);
+    setDatasets((prev) =>
+      prev.map((d) => {
+        if (d.id !== activeDatasetId) return d;
+        const currentDashboards = d.dashboards || [];
+        const existsIndex = currentDashboards.findIndex((dash) => dash.id === savedDash.id);
+        let nextDashboards = [...currentDashboards];
+        if (existsIndex !== -1) {
+          nextDashboards[existsIndex] = savedDash;
+        } else {
+          nextDashboards = [...nextDashboards, savedDash];
+        }
+        return {
+          ...d,
+          dashboards: nextDashboards,
+          activeDashboardId: savedDash.id,
+          updatedAt: Date.now(),
+        };
+      })
+    );
     showNotification(`Dashboard "${savedDash.title}" saved.`);
   };
 
@@ -487,8 +680,17 @@ export default function App() {
       title: `${dash.title} (Copy)`,
       createdAt: Date.now(),
     };
-    setDashboards((prev) => [...prev, duplicated]);
-    setActiveDashboardId(duplicated.id);
+    setDatasets((prev) =>
+      prev.map((d) => {
+        if (d.id !== activeDatasetId) return d;
+        return {
+          ...d,
+          dashboards: [...(d.dashboards || []), duplicated],
+          activeDashboardId: duplicated.id,
+          updatedAt: Date.now(),
+        };
+      })
+    );
     showNotification(`Duplicated dashboard to "${duplicated.title}".`);
   };
 
@@ -497,34 +699,43 @@ export default function App() {
       showNotification('Cannot delete the only remaining dashboard.');
       return;
     }
-    setDashboards((prev) => prev.filter((d) => d.id !== id));
-    if (activeDashboardId === id) {
-      const remaining = dashboards.filter((d) => d.id !== id);
-      if (remaining.length > 0) {
-        setActiveDashboardId(remaining[0].id);
-      }
-    }
+    setDatasets((prev) =>
+      prev.map((d) => {
+        if (d.id !== activeDatasetId) return d;
+        const remaining = (d.dashboards || []).filter((dash) => dash.id !== id);
+        return {
+          ...d,
+          dashboards: remaining,
+          activeDashboardId: d.activeDashboardId === id ? remaining[0]?.id || '' : d.activeDashboardId,
+          updatedAt: Date.now(),
+        };
+      })
+    );
     showNotification('Dashboard tab removed.');
   };
 
   const handleApplyDashboards = (chosenDashboards: DashboardConfig[], activeId?: string) => {
     if (chosenDashboards && chosenDashboards.length > 0) {
-      setDashboards(chosenDashboards);
-      if (activeId) {
-        setActiveDashboardId(activeId);
-      } else {
-        setActiveDashboardId(chosenDashboards[0].id);
-      }
+      setDatasets((prev) =>
+        prev.map((d) => {
+          if (d.id !== activeDatasetId) return d;
+          return {
+            ...d,
+            dashboards: chosenDashboards,
+            activeDashboardId: activeId || chosenDashboards[0].id,
+            updatedAt: Date.now(),
+          };
+        })
+      );
       showNotification(`Activated ${chosenDashboards.length} dashboards.`);
     }
   };
 
-  // Update profile configuration (e.g. override primary dimension, metrics, column types)
+  // Update profile configuration
   const handleUpdateProfile = (updatedProfile: DatasetProfile) => {
-    setProfile(updatedProfile);
-    if (currentSampleIndex === -1) {
-      saveActiveCustomDataset(records, updatedProfile, datasetName, fileName);
-    }
+    setDatasets((prev) =>
+      prev.map((d) => (d.id === activeDatasetId ? { ...d, profile: updatedProfile, updatedAt: Date.now() } : d))
+    );
     showNotification('Dataset schema and chart dimension mappings updated.');
   };
 
@@ -567,65 +778,73 @@ export default function App() {
     });
   }, [records, filters]);
 
-  // Real-time Mutation Engine (adapts to whatever dataset is active)
+  // Real-time Mutation Engine (adapts to active dataset)
   useEffect(() => {
     if (!isRealtimeActive || records.length === 0) return;
 
     const intervalId = setInterval(() => {
-      setRecords((prevRecords) => {
-        if (prevRecords.length === 0) return prevRecords;
+      setDatasets((prevDatasets) => {
+        return prevDatasets.map((ds) => {
+          if (ds.id !== activeDatasetId) return ds;
+          if (ds.records.length === 0) return ds;
 
-        const numCols = profile.columns.filter((c) => c.type === 'numeric');
-        if (numCols.length === 0) return prevRecords;
+          const numCols = ds.profile.columns.filter((c) => c.type === 'numeric');
+          if (numCols.length === 0) return ds;
 
-        const randomIndex = Math.floor(Math.random() * prevRecords.length);
-        const target = prevRecords[randomIndex];
-        const randomCol = numCols[Math.floor(Math.random() * numCols.length)];
+          const randomIndex = Math.floor(Math.random() * ds.records.length);
+          const target = ds.records[randomIndex];
+          const randomCol = numCols[Math.floor(Math.random() * numCols.length)];
 
-        const currentVal = Number(target[randomCol.key]) || 0;
-        const deltaPercent = (Math.random() * 0.16 - 0.06);
-        let newVal = Math.max(0, currentVal * (1 + deltaPercent));
-        if (currentVal > 100) {
-          newVal = Math.round(newVal);
-        } else {
-          newVal = Number(newVal.toFixed(2));
-        }
+          const currentVal = Number(target[randomCol.key]) || 0;
+          const deltaPercent = (Math.random() * 0.16 - 0.06);
+          let newVal = Math.max(0, currentVal * (1 + deltaPercent));
+          if (currentVal > 100) {
+            newVal = Math.round(newVal);
+          } else {
+            newVal = Number(newVal.toFixed(2));
+          }
 
-        const idColKey = profile.idKey;
-        const targetId = String(target[idColKey] || target.id || target._id || `ROW-${randomIndex}`);
+          const idColKey = ds.profile.idKey;
+          const targetId = String(target[idColKey] || target.id || target._id || `ROW-${randomIndex}`);
 
-        const updatedRecord = {
-          ...target,
-          [randomCol.key]: newVal,
-          _lastUpdated: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }),
-        };
+          const updatedRecord = {
+            ...target,
+            [randomCol.key]: newVal,
+            _lastUpdated: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }),
+          };
 
-        const newEvent: UpdateEvent = {
-          id: `EVT-${Date.now()}`,
-          timestamp: new Date(),
-          type: 'auto_sync',
-          recordId: targetId,
-          description: `Live cloud update on ${randomCol.name}: ${formatMetricValue(currentVal, randomCol.isCurrency)} → ${formatMetricValue(newVal, randomCol.isCurrency)}`,
-          details: {
-            field: randomCol.name,
-            oldValue: formatMetricValue(currentVal, randomCol.isCurrency),
-            newValue: formatMetricValue(newVal, randomCol.isCurrency),
-          },
-        };
+          const newEvent: UpdateEvent = {
+            id: `EVT-${Date.now()}`,
+            timestamp: new Date(),
+            type: 'auto_sync',
+            recordId: targetId,
+            description: `[${ds.name}] Live cloud update on ${randomCol.name}: ${formatMetricValue(currentVal, randomCol.isCurrency)} → ${formatMetricValue(newVal, randomCol.isCurrency)}`,
+            details: {
+              field: randomCol.name,
+              oldValue: formatMetricValue(currentVal, randomCol.isCurrency),
+              newValue: formatMetricValue(newVal, randomCol.isCurrency),
+            },
+          };
 
-        setEvents((prev) => [newEvent, ...prev.slice(0, 49)]);
-        setRecentlyUpdatedId(targetId);
-        setLastSyncTime(new Date());
-        setUpdateCount((c) => c + 1);
+          setEvents((prev) => [newEvent, ...prev.slice(0, 49)]);
+          setRecentlyUpdatedId(targetId);
+          setLastSyncTime(new Date());
+          setUpdateCount((c) => c + 1);
 
-        const newRecords = [...prevRecords];
-        newRecords[randomIndex] = updatedRecord;
-        return newRecords;
+          const newRecords = [...ds.records];
+          newRecords[randomIndex] = updatedRecord;
+
+          return {
+            ...ds,
+            records: newRecords,
+            updatedAt: Date.now(),
+          };
+        });
       });
     }, refreshInterval * 1000);
 
     return () => clearInterval(intervalId);
-  }, [isRealtimeActive, refreshInterval, records.length, profile]);
+  }, [isRealtimeActive, refreshInterval, activeDatasetId, records.length, profile]);
 
   // Clear highlight after a short delay
   useEffect(() => {
@@ -669,8 +888,14 @@ export default function App() {
     const idKey = profile.idKey;
     const targetId = String(updated[idKey] || updated.id || updated._id);
 
-    setRecords((prev) =>
-      prev.map((r) => (String(r[idKey] || r.id || r._id) === targetId ? updated : r))
+    setDatasets((prev) =>
+      prev.map((d) => {
+        if (d.id !== activeDatasetId) return d;
+        const nextRecords = d.records.map((r) =>
+          String(r[idKey] || r.id || r._id) === targetId ? updated : r
+        );
+        return { ...d, records: nextRecords, updatedAt: Date.now() };
+      })
     );
     setRecentlyUpdatedId(targetId);
     setLastSyncTime(new Date());
@@ -684,14 +909,19 @@ export default function App() {
     };
     setEvents((prev) => [newEvent, ...prev.slice(0, 49)]);
     showNotification(`Record ${targetId} saved.`);
-  }, [profile.idKey]);
+  }, [profile.idKey, activeDatasetId]);
 
   const handleAddRecord = useCallback((newRec: GenericRecord) => {
     const idKey = profile.idKey;
     const recId = String(newRec[idKey] || `REC-${Date.now().toString().slice(-4)}`);
     const complete = { ...newRec, [idKey]: recId };
 
-    setRecords((prev) => [complete, ...prev]);
+    setDatasets((prev) =>
+      prev.map((d) => {
+        if (d.id !== activeDatasetId) return d;
+        return { ...d, records: [complete, ...d.records], updatedAt: Date.now() };
+      })
+    );
     setRecentlyUpdatedId(recId);
     setLastSyncTime(new Date());
 
@@ -704,12 +934,16 @@ export default function App() {
     };
     setEvents((prev) => [newEvent, ...prev.slice(0, 49)]);
     showNotification(`New record ${recId} added.`);
-  }, [profile.idKey]);
+  }, [profile.idKey, activeDatasetId]);
 
   const handleDeleteRecord = useCallback((recordId: string) => {
     const idKey = profile.idKey;
-    setRecords((prev) =>
-      prev.filter((r) => String(r[idKey] || r.id || r._id) !== recordId)
+    setDatasets((prev) =>
+      prev.map((d) => {
+        if (d.id !== activeDatasetId) return d;
+        const nextRecords = d.records.filter((r) => String(r[idKey] || r.id || r._id) !== recordId);
+        return { ...d, records: nextRecords, updatedAt: Date.now() };
+      })
     );
     setLastSyncTime(new Date());
 
@@ -722,149 +956,7 @@ export default function App() {
     };
     setEvents((prev) => [newEvent, ...prev.slice(0, 49)]);
     showNotification(`Record ${recordId} removed.`);
-  }, [profile.idKey]);
-
-  // Apply shared view from URL
-  const handleApplySharedView = (shareUrl: string) => {
-    try {
-      const urlObj = new URL(shareUrl);
-      const urlParams = urlObj.searchParams;
-      const hash = urlObj.hash || '';
-
-      // Check for compressed data payload
-      const rawPayload = extractDataPayload(hash) || extractDataPayload(urlParams.get('data') || '') || extractDataPayload(shareUrl);
-      let datasetLoaded = false;
-
-      if (rawPayload) {
-        const decoded = decodeDatasetFromCompressedString(rawPayload);
-        if (decoded && decoded.records && decoded.records.length > 0) {
-          setRecords(decoded.records);
-          setProfile(decoded.profile);
-          setDatasetName(decoded.datasetName);
-          setFileName(decoded.fileName);
-          setCurrentSampleIndex(-1);
-          datasetLoaded = true;
-        }
-      }
-
-      if (!datasetLoaded) {
-        const sidParam = urlParams.get('sid');
-        if (sidParam) {
-          const sharedData = loadSharedDataset(sidParam);
-          if (sharedData && sharedData.records && sharedData.records.length > 0) {
-            setRecords(sharedData.records);
-            setProfile(sharedData.profile);
-            setDatasetName(sharedData.datasetName);
-            setFileName(sharedData.fileName);
-            setCurrentSampleIndex(-1);
-            datasetLoaded = true;
-          }
-        }
-      }
-
-      if (!datasetLoaded) {
-        const sampleParam = urlParams.get('sample');
-        if (sampleParam) {
-          const cleanParam = sampleParam.toLowerCase().trim();
-          let idx = sampleDatasets.findIndex(
-            (s) => 
-              s.id.toLowerCase() === cleanParam || 
-              s.name.toLowerCase() === cleanParam ||
-              s.id.toLowerCase().replace(/_/g, '') === cleanParam.replace(/_/g, '')
-          );
-          if (idx === -1 && !isNaN(Number(sampleParam)) && sampleDatasets[Number(sampleParam)]) {
-            idx = Number(sampleParam);
-          }
-          if (idx !== -1) {
-            const sample = sampleDatasets[idx];
-            setCurrentSampleIndex(idx);
-            setRecords(sample.records);
-            setProfile(profileDataset(sample.records, sample.name));
-            setDatasetName(sample.name);
-            setFileName(sample.fileName);
-            datasetLoaded = true;
-          }
-        }
-      }
-
-      if (!datasetLoaded) {
-        const activeCustom = loadActiveCustomDataset();
-        if (activeCustom && activeCustom.records && activeCustom.records.length > 0) {
-          setRecords(activeCustom.records);
-          setProfile(activeCustom.profile);
-          setDatasetName(activeCustom.datasetName);
-          setFileName(activeCustom.fileName);
-          setCurrentSampleIndex(-1);
-        }
-      }
-
-      const themeParam = urlParams.get('theme') as ThemeId;
-      if (themeParam && THEMES[themeParam]) {
-        setCurrentThemeId(themeParam);
-      }
-
-      const liveParam = urlParams.get('live');
-      if (liveParam !== null) {
-        setIsRealtimeActive(liveParam === '1' || liveParam === 'true');
-      }
-
-      const presetParam = urlParams.get('preset');
-      const qParam = urlParams.get('q') || '';
-      const fstateParam = urlParams.get('fstate');
-      let catFilters: Record<string, string[]> = {};
-      let numFilters: Record<string, [number, number]> = {};
-      if (fstateParam) {
-        try {
-          const decodedF = JSON.parse(decodeURIComponent(fstateParam));
-          if (decodedF?.c) catFilters = decodedF.c;
-          if (decodedF?.n) numFilters = decodedF.n;
-        } catch {
-          // ignore
-        }
-      }
-      if (presetParam) {
-        handleApplyPreset(presetParam);
-      }
-      setFilters((prev) => ({
-        ...prev,
-        searchQuery: qParam,
-        categoricalFilters: catFilters,
-        numericRanges: numFilters,
-      }));
-
-      setIsSharedMode(true);
-      if (typeof window !== 'undefined') {
-        window.history.pushState({}, '', shareUrl);
-      }
-      showNotification('Loaded shared live dashboard view successfully!');
-    } catch (e) {
-      console.error('Failed to apply shared view:', e);
-    }
-  };
-
-  // Listen for browser back/forward or hash change to sync dataset state dynamically
-  useEffect(() => {
-    const handleUrlStateChange = () => {
-      const resolved = resolveInitialDataset();
-      if (resolved) {
-        setRecords(resolved.records);
-        setProfile(resolved.profile);
-        setDatasetName(resolved.datasetName);
-        setFileName(resolved.fileName);
-        setCurrentSampleIndex(resolved.sampleIndex);
-        if (resolved.isShared) {
-          setIsSharedMode(true);
-        }
-      }
-    };
-
-    window.addEventListener('hashchange', handleUrlStateChange);
-    window.addEventListener('popstate', handleUrlStateChange);
-    return () => {
-      window.removeEventListener('hashchange', handleUrlStateChange);
-      window.removeEventListener('popstate', handleUrlStateChange);
-    };
-  }, []);
+  }, [profile.idKey, activeDatasetId]);
 
   const handleResetData = () => {
     handleSelectSample(0);
@@ -919,11 +1011,14 @@ export default function App() {
           currentThemeId={currentThemeId}
           onOpenThemeModal={() => setIsThemeModalOpen(true)}
           onSelectTheme={setCurrentThemeId}
-          onOpenShareModal={() => setIsShareModalOpen(true)}
+          onOpenShareModal={() => {
+            setTargetShareDatasetId(activeDatasetId);
+            setIsShareModalOpen(true);
+          }}
           isSharedMode={isSharedMode}
         />
 
-        {/* Sub-Header: Demo Dataset Quick Selectors + Live Feed & SQLite Status */}
+        {/* Sub-Header: Multi-Dataset Quick Hub & SQLite Status */}
         <div
           className="border-b py-2.5 px-4 sm:px-6 lg:px-8 shadow-2xs transition-colors"
           style={{
@@ -938,15 +1033,16 @@ export default function App() {
                 {/* Quick Dataset Switcher Buttons */}
                 <div className="flex flex-wrap items-center gap-1.5">
                   <span className="text-xs font-bold mr-1 flex items-center" style={{ color: theme.textSecondary }}>
-                    <Layers className="w-3.5 h-3.5 mr-1" style={{ color: theme.accentPrimary }} />
-                    Demo Datasets:
+                    <FolderKanban className="w-3.5 h-3.5 mr-1" style={{ color: theme.accentPrimary }} />
+                    Workspace Datasets ({datasets.length}):
                   </span>
-                  {sampleDatasets.map((sample, idx) => {
-                    const isActive = currentSampleIndex === idx;
+                  {datasets.map((ds) => {
+                    const isActive = ds.id === activeDatasetId;
                     return (
                       <button
-                        key={sample.id}
-                        onClick={() => handleSelectSample(idx)}
+                        key={ds.id}
+                        id={`header-ds-btn-${ds.id}`}
+                        onClick={() => handleSelectDataset(ds.id)}
                         className={`px-3 py-1 rounded-xl text-xs font-semibold transition cursor-pointer border ${
                           isActive ? 'text-white shadow-xs' : ''
                         }`}
@@ -955,31 +1051,29 @@ export default function App() {
                           color: isActive ? '#FFFFFF' : theme.textSecondary,
                           borderColor: isActive ? 'transparent' : theme.borderSubtle,
                         }}
-                        title={`Load ${sample.name} (${sample.records.length} rows)`}
+                        title={`Switch to ${ds.name} (${ds.records.length} rows, ${ds.dashboards?.length || 1} dashboards)`}
                       >
-                        {sample.name}
+                        {ds.name}
                       </button>
                     );
                   })}
 
-                  {/* Active Custom Upload Indicator Badge */}
-                  {currentSampleIndex === -1 && (
-                    <span
-                      className="px-2.5 py-1 rounded-xl text-xs font-bold border flex items-center space-x-1.5 shadow-2xs"
-                      style={{
-                        backgroundColor: theme.bgBadge,
-                        borderColor: '#10B981',
-                        color: '#10B981',
-                      }}
-                      title={`Active uploaded custom dataset: ${fileName}`}
-                    >
-                      <FileSpreadsheet className="w-3.5 h-3.5" />
-                      <span>{fileName}</span>
-                    </span>
-                  )}
+                  {/* Add Dataset Button */}
+                  <button
+                    onClick={() => setIsDatasetsManagerOpen(true)}
+                    className="px-2.5 py-1 rounded-xl text-xs font-bold border flex items-center space-x-1 transition cursor-pointer hover:opacity-85"
+                    style={{
+                      backgroundColor: theme.bgInput,
+                      borderColor: theme.borderSubtle,
+                      color: theme.accentPrimary,
+                    }}
+                    title="Open Datasets Manager to add more datasets or upload batch files"
+                  >
+                    <span>+ Manage / Add</span>
+                  </button>
                 </div>
 
-                {/* Sync status, SQLite status & changelog button */}
+                {/* Sync status, SQLite status & actions */}
                 <div className="flex items-center space-x-2.5">
                   {/* Multi-Dashboard Generator trigger */}
                   <button
@@ -999,7 +1093,10 @@ export default function App() {
 
                   {/* Share button quick access */}
                   <button
-                    onClick={() => setIsShareModalOpen(true)}
+                    onClick={() => {
+                      setTargetShareDatasetId(activeDatasetId);
+                      setIsShareModalOpen(true);
+                    }}
                     className="inline-flex items-center space-x-1.5 text-xs font-bold px-3 py-1 rounded-full border transition cursor-pointer shadow-xs"
                     style={{
                       backgroundColor: theme.bgInput,
@@ -1009,7 +1106,7 @@ export default function App() {
                     title="Generate shareable live dashboard link"
                   >
                     <Share2 className="w-3.5 h-3.5" />
-                    <span>Share Link</span>
+                    <span>Share Separate Link</span>
                   </button>
 
                   {/* SQLite DB pill badge */}
@@ -1073,9 +1170,11 @@ export default function App() {
                 </div>
 
                 <div className="flex items-center space-x-2">
-                  {/* Share button in shared mode */}
                   <button
-                    onClick={() => setIsShareModalOpen(true)}
+                    onClick={() => {
+                      setTargetShareDatasetId(activeDatasetId);
+                      setIsShareModalOpen(true);
+                    }}
                     className="inline-flex items-center space-x-1.5 text-xs font-bold px-3 py-1.5 rounded-xl border transition cursor-pointer hover:opacity-80 shadow-2xs"
                     style={{
                       backgroundColor: theme.bgInput,
@@ -1095,6 +1194,20 @@ export default function App() {
 
         {/* Main Workspace Body */}
         <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6 space-y-6">
+          {/* Dataset Switcher Bar (Always accessible for fast multi-dataset jumping and management) */}
+          <DatasetSwitcherBar
+            datasets={datasets}
+            activeDatasetId={activeDatasetId}
+            onSelectDataset={handleSelectDataset}
+            onOpenDatasetsManager={() => setIsDatasetsManagerOpen(true)}
+            onBatchUploadFiles={handleBatchUploadFiles}
+            onShareDataset={handleOpenShareModalForDataset}
+            onDuplicateDataset={handleDuplicateDataset}
+            onDeleteDataset={handleDeleteDataset}
+            theme={theme}
+            isSharedMode={isSharedMode}
+          />
+
           {/* If in Shared Mode, always render the focused Dashboard & Filters */}
           {isSharedMode ? (
             <div className="space-y-6">
@@ -1163,7 +1276,7 @@ export default function App() {
                       const idx = sampleDatasets.findIndex((s) => s.id === id);
                       if (idx !== -1) handleSelectSample(idx);
                     }}
-                    activeSampleId={sampleDatasets[currentSampleIndex]?.id}
+                    activeSampleId={currentDataset.sampleId}
                     onUploadFileClick={() => document.getElementById('upload-file-btn')?.click()}
                     theme={theme}
                   />
@@ -1257,6 +1370,22 @@ export default function App() {
         </main>
       </div>
 
+      {/* Datasets & Dashboards Manager Hub Modal */}
+      <DatasetsManagerModal
+        isOpen={isDatasetsManagerOpen}
+        onClose={() => setIsDatasetsManagerOpen(false)}
+        datasets={datasets}
+        activeDatasetId={activeDatasetId}
+        onSelectDataset={handleSelectDataset}
+        onAddDataset={handleAddDataset}
+        onAddMultipleDatasets={handleAddMultipleDatasets}
+        onUpdateDataset={handleUpdateDataset}
+        onDuplicateDataset={handleDuplicateDataset}
+        onDeleteDataset={handleDeleteDataset}
+        onOpenShareModalForDataset={handleOpenShareModalForDataset}
+        theme={theme}
+      />
+
       {/* Upload Data Verification & Multi-Dashboard Batch Generator Modal */}
       <DataCheckModal
         isOpen={isDataCheckModalOpen}
@@ -1284,18 +1413,24 @@ export default function App() {
       {/* Share Live Dashboard Modal */}
       <ShareDashboardModal
         isOpen={isShareModalOpen}
-        onClose={() => setIsShareModalOpen(false)}
+        onClose={() => {
+          setIsShareModalOpen(false);
+          setTargetShareDatasetId(undefined);
+        }}
         datasetName={datasetName}
         fileName={fileName}
         records={records}
         profile={profile}
-        sampleId={currentSampleIndex >= 0 ? sampleDatasets[currentSampleIndex]?.id : undefined}
-        isCustomUpload={currentSampleIndex === -1}
+        sampleId={currentDataset.sampleId}
+        isCustomUpload={currentDataset.isCustomUpload}
         themeId={currentThemeId}
         theme={theme}
         filters={filters}
         activePreset={activePreset}
         isRealtimeActive={isRealtimeActive}
+        datasets={datasets}
+        activeDatasetId={activeDatasetId}
+        initialTargetDatasetId={targetShareDatasetId}
       />
 
       {/* Theme Showcase Modal */}
@@ -1351,14 +1486,15 @@ export default function App() {
               {isSharedMode ? <BarChart3 className="w-3.5 h-3.5" /> : <Database className="w-3.5 h-3.5" />}
             </div>
             <span className="font-bold" style={{ color: theme.textPrimary }}>
-              {isSharedMode ? `${datasetName} • Live Interactive Analytics Dashboard` : 'SQLite Engine • Multi-Theme Universal Dashboard Showcase'}
+              {isSharedMode ? `${datasetName} • Live Interactive Analytics Dashboard` : 'SQLite Engine • Multi-Dataset & Multi-Dashboard Showcase'}
             </span>
           </div>
           <p style={{ color: theme.textMuted }}>
-            {isSharedMode ? 'Dynamic KPI Aggregations • Universal Interactive Filters • High-Resolution Visualizations' : 'WASM SQLite SQL Console • 6 Curated Visual Themes • Real-time Excel Synchronization • Universal File Ingestion'}
+            {isSharedMode ? 'Dynamic KPI Aggregations • Universal Interactive Filters • High-Resolution Visualizations' : 'Multiple Dataset Dashboards • WASM SQLite Engine • 6 Curated Themes • Separate Share Links • Batch File Uploads'}
           </p>
         </div>
       </footer>
     </div>
   );
 }
+

@@ -117,6 +117,32 @@ export interface SampleDatasetInfo {
   rowCount: number;
 }
 
+export interface ManagedDataset {
+  id: string;
+  name: string;
+  fileName: string;
+  category?: string;
+  icon?: string;
+  records: GenericRecord[];
+  profile: DatasetProfile;
+  dashboards: DashboardConfig[];
+  activeDashboardId: string;
+  filters?: UniversalFilterState;
+  activePreset?: string;
+  createdAt: number;
+  updatedAt: number;
+  isCustomUpload?: boolean;
+  sampleId?: string;
+  shareId?: string;
+}
+
+export interface MultiDatasetBundle {
+  version: string;
+  activeDatasetId: string;
+  datasets: ManagedDataset[];
+  exportedAt: number;
+}
+
 // Legacy payroll interfaces for backward compatibility
 export interface EmployeeRecord {
   id: string;
