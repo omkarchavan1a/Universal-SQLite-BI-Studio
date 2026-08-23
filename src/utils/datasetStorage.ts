@@ -27,7 +27,35 @@ interface CompactDatasetRepresentation {
 }
 
 const ACTIVE_CUSTOM_DATASET_KEY = 'universal_studio_active_custom_dataset';
-const SAVED_CUSTOM_DATASETS_PREFIX = 'universal_studio_dataset_';
+const SHARED_DATASET_PREFIX = 'universal_studio_shared_ds_';
+
+/**
+ * Extracts clean compressed payload from hash, query string, or full URL
+ */
+export function extractDataPayload(input: string): string {
+  if (!input || typeof input !== 'string') return '';
+  const str = input.trim();
+
+  // Check for data= in hash or search
+  const regexMatch = str.match(/[#?&]data=([^&#]+)/i);
+  if (regexMatch && regexMatch[1]) {
+    return regexMatch[1];
+  }
+
+  if (str.startsWith('#data=')) {
+    return str.substring('#data='.length).split('&')[0];
+  }
+  if (str.startsWith('data=')) {
+    return str.substring('data='.length).split('&')[0];
+  }
+
+  // If the string starts with # without data=
+  if (str.startsWith('#') && !str.includes('=')) {
+    return str.substring(1);
+  }
+
+  return str;
+}
 
 /**
  * Compacts and encodes a dataset into an LZ-compressed URL-safe string
@@ -40,36 +68,41 @@ export function encodeDatasetToCompressedString(
 ): string {
   if (!records || records.length === 0) return '';
 
-  // Extract ordered list of column keys
-  const columnKeys = profile.columns && profile.columns.length > 0
-    ? profile.columns.map((c) => c.key)
-    : Object.keys(records[0] || {}).filter((k) => !k.startsWith('_'));
+  try {
+    // Extract ordered list of column keys
+    const columnKeys = profile.columns && profile.columns.length > 0
+      ? profile.columns.map((c) => c.key)
+      : Object.keys(records[0] || {}).filter((k) => !k.startsWith('_'));
 
-  // Convert array of objects to compact 2D array
-  const rows: any[][] = records.map((rec) => {
-    return columnKeys.map((k) => {
-      const val = rec[k];
-      return val !== undefined ? val : null;
+    // Convert array of objects to compact 2D array
+    const rows: any[][] = records.map((rec) => {
+      return columnKeys.map((k) => {
+        const val = rec[k];
+        return val !== undefined ? val : null;
+      });
     });
-  });
 
-  const compact: CompactDatasetRepresentation = {
-    n: name || 'Custom Dataset',
-    f: fileName || 'dataset.csv',
-    c: columnKeys,
-    r: rows,
-    p: {
-      dim: profile.primaryDimensionKey,
-      dim2: profile.secondaryDimensionKey,
-      met: profile.primaryMetricKey,
-      met2: profile.secondaryMetricKey,
-      date: profile.dateKey,
-      id: profile.idKey,
-    },
-  };
+    const compact: CompactDatasetRepresentation = {
+      n: name || 'Custom Dataset',
+      f: fileName || 'dataset.csv',
+      c: columnKeys,
+      r: rows,
+      p: {
+        dim: profile.primaryDimensionKey,
+        dim2: profile.secondaryDimensionKey,
+        met: profile.primaryMetricKey,
+        met2: profile.secondaryMetricKey,
+        date: profile.dateKey,
+        id: profile.idKey,
+      },
+    };
 
-  const jsonString = JSON.stringify(compact);
-  return LZString.compressToEncodedURIComponent(jsonString);
+    const jsonString = JSON.stringify(compact);
+    return LZString.compressToEncodedURIComponent(jsonString);
+  } catch (err) {
+    console.error('Failed to encode dataset to compressed string:', err);
+    return '';
+  }
 }
 
 /**
@@ -81,18 +114,20 @@ export function decodeDatasetFromCompressedString(
   if (!compressedStr || typeof compressedStr !== 'string') return null;
 
   try {
-    const raw = compressedStr.trim();
+    let raw = extractDataPayload(compressedStr).trim();
+    if (!raw) return null;
+
     let jsonString: string | null = null;
 
     // Strategy 1: Direct decompressFromEncodedURIComponent
     jsonString = LZString.decompressFromEncodedURIComponent(raw);
 
-    // Strategy 2: Replace spaces with '+' (when query string parses '+' as space)
+    // Strategy 2: If query params parsed '+' as space
     if (!jsonString && raw.includes(' ')) {
       jsonString = LZString.decompressFromEncodedURIComponent(raw.replace(/ /g, '+'));
     }
 
-    // Strategy 3: Decode URI component first if percent-encoded
+    // Strategy 3: Try decoding URI component first
     if (!jsonString) {
       try {
         const uriDecoded = decodeURIComponent(raw);
@@ -108,6 +143,11 @@ export function decodeDatasetFromCompressedString(
     // Strategy 4: Fallback to Base64 or standard decompression
     if (!jsonString) {
       jsonString = LZString.decompressFromBase64(raw) || LZString.decompress(raw);
+    }
+
+    // Strategy 5: Check if the string was already raw JSON
+    if (!jsonString && raw.startsWith('{') && raw.endsWith('}')) {
+      jsonString = raw;
     }
 
     if (!jsonString) return null;
@@ -179,7 +219,7 @@ export function decodeDatasetFromCompressedString(
 }
 
 /**
- * Saves the active custom uploaded dataset into localStorage
+ * Saves the active custom uploaded dataset into localStorage & sessionStorage
  */
 export function saveActiveCustomDataset(
   records: GenericRecord[],
@@ -197,14 +237,96 @@ export function saveActiveCustomDataset(
       profile,
       timestamp: Date.now(),
     };
-    localStorage.setItem(ACTIVE_CUSTOM_DATASET_KEY, JSON.stringify(payload));
+    const serialized = JSON.stringify(payload);
+    try {
+      localStorage.setItem(ACTIVE_CUSTOM_DATASET_KEY, serialized);
+    } catch {
+      // quota or sandbox
+    }
+    try {
+      sessionStorage.setItem(ACTIVE_CUSTOM_DATASET_KEY, serialized);
+    } catch {
+      // ignore
+    }
   } catch (err) {
-    console.warn('Could not save custom dataset to localStorage (storage quota or iframe sandbox):', err);
+    console.warn('Could not save custom dataset:', err);
   }
 }
 
 /**
- * Loads the active custom uploaded dataset from localStorage
+ * Saves a shared dataset by share ID (sid) into multi-tier storage
+ */
+export function saveSharedDataset(
+  sid: string,
+  records: GenericRecord[],
+  profile: DatasetProfile,
+  datasetName: string,
+  fileName: string
+): void {
+  if (typeof window === 'undefined' || !sid) return;
+
+  try {
+    const payload = {
+      id: sid,
+      name: datasetName,
+      fileName,
+      records,
+      profile,
+      timestamp: Date.now(),
+    };
+    const serialized = JSON.stringify(payload);
+    try {
+      localStorage.setItem(SHARED_DATASET_PREFIX + sid, serialized);
+    } catch {
+      // ignore
+    }
+    try {
+      sessionStorage.setItem(SHARED_DATASET_PREFIX + sid, serialized);
+    } catch {
+      // ignore
+    }
+    // Also save as active custom dataset
+    saveActiveCustomDataset(records, profile, datasetName, fileName);
+  } catch (err) {
+    console.warn('Could not save shared dataset:', err);
+  }
+}
+
+/**
+ * Loads a shared dataset by share ID (sid)
+ */
+export function loadSharedDataset(
+  sid: string
+): { records: GenericRecord[]; profile: DatasetProfile; datasetName: string; fileName: string } | null {
+  if (typeof window === 'undefined' || !sid) return null;
+
+  try {
+    let saved = null;
+    try {
+      saved = sessionStorage.getItem(SHARED_DATASET_PREFIX + sid) || localStorage.getItem(SHARED_DATASET_PREFIX + sid);
+    } catch {
+      // ignore
+    }
+
+    if (saved) {
+      const parsed = JSON.parse(saved);
+      if (parsed && Array.isArray(parsed.records) && parsed.records.length > 0 && parsed.profile) {
+        return {
+          records: parsed.records,
+          profile: parsed.profile,
+          datasetName: parsed.name || 'Custom Dataset',
+          fileName: parsed.fileName || 'uploaded_data.csv',
+        };
+      }
+    }
+  } catch (err) {
+    console.warn('Failed to parse shared dataset by sid:', err);
+  }
+  return null;
+}
+
+/**
+ * Loads the active custom uploaded dataset from localStorage or sessionStorage
  */
 export function loadActiveCustomDataset(): {
   records: GenericRecord[];
@@ -215,7 +337,13 @@ export function loadActiveCustomDataset(): {
   if (typeof window === 'undefined') return null;
 
   try {
-    const saved = localStorage.getItem(ACTIVE_CUSTOM_DATASET_KEY);
+    let saved = null;
+    try {
+      saved = localStorage.getItem(ACTIVE_CUSTOM_DATASET_KEY) || sessionStorage.getItem(ACTIVE_CUSTOM_DATASET_KEY);
+    } catch {
+      // ignore
+    }
+
     if (!saved) return null;
 
     const parsed = JSON.parse(saved);
@@ -228,7 +356,7 @@ export function loadActiveCustomDataset(): {
       };
     }
   } catch (err) {
-    console.warn('Failed to parse active custom dataset from localStorage:', err);
+    console.warn('Failed to parse active custom dataset from storage:', err);
   }
   return null;
 }
@@ -240,7 +368,9 @@ export function clearActiveCustomDataset(): void {
   if (typeof window === 'undefined') return;
   try {
     localStorage.removeItem(ACTIVE_CUSTOM_DATASET_KEY);
+    sessionStorage.removeItem(ACTIVE_CUSTOM_DATASET_KEY);
   } catch (err) {
     // Ignore
   }
 }
+

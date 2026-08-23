@@ -30,7 +30,7 @@ import {
   Gauge,
   Zap,
 } from 'lucide-react';
-import { DatasetProfile, GenericRecord } from '../types';
+import { DatasetProfile, GenericRecord, DashboardConfig } from '../types';
 import { formatMetricValue } from '../utils/universalParser';
 import { ThemeConfig, getTheme } from '../themes';
 
@@ -38,6 +38,7 @@ interface ChartsSectionProps {
   profile: DatasetProfile;
   records?: GenericRecord[];
   theme?: ThemeConfig;
+  activeDashboard?: DashboardConfig;
 }
 
 const chartsContainerVariants = {
@@ -69,6 +70,7 @@ export const ChartsSection: React.FC<ChartsSectionProps> = ({
   profile,
   records = [],
   theme: propTheme,
+  activeDashboard,
 }) => {
   const theme = propTheme || getTheme('berry_noir');
   const [activeTab, setActiveTab] = useState<'all' | 'bar' | 'pie' | 'line' | 'scatter'>('all');
@@ -79,24 +81,32 @@ export const ChartsSection: React.FC<ChartsSectionProps> = ({
 
   // Chart Interactive Dimension & Metric Selectors
   const [selectedDimension, setSelectedDimension] = useState<string>(
-    profile?.primaryDimensionKey || columns[0]?.key || ''
+    activeDashboard?.dimensionKey || profile?.primaryDimensionKey || columns[0]?.key || ''
   );
   const [selectedMetric1, setSelectedMetric1] = useState<string>(
-    profile?.primaryMetricKey || columns.find((c) => c.type === 'numeric')?.key || ''
+    activeDashboard?.metricKey1 || profile?.primaryMetricKey || columns.find((c) => c.type === 'numeric')?.key || ''
   );
   const [selectedMetric2, setSelectedMetric2] = useState<string>(
-    profile?.secondaryMetricKey || columns.filter((c) => c.type === 'numeric')[1]?.key || ''
+    activeDashboard?.metricKey2 || profile?.secondaryMetricKey || columns.filter((c) => c.type === 'numeric')[1]?.key || ''
   );
 
-  // Sync state when profile changes
+  // Sync state when activeDashboard or profile changes
   useEffect(() => {
-    if (profile) {
+    if (activeDashboard) {
+      if (activeDashboard.dimensionKey) setSelectedDimension(activeDashboard.dimensionKey);
+      if (activeDashboard.metricKey1) setSelectedMetric1(activeDashboard.metricKey1);
+      if (activeDashboard.metricKey2 !== undefined) setSelectedMetric2(activeDashboard.metricKey2);
+      if (activeDashboard.chartLayout && ['all', 'bar', 'pie', 'line', 'scatter'].includes(activeDashboard.chartLayout)) {
+        setActiveTab(activeDashboard.chartLayout as any);
+      }
+      if (activeDashboard.barMode) setBarMode(activeDashboard.barMode);
+    } else if (profile) {
       const cols = profile.columns || [];
       setSelectedDimension(profile.primaryDimensionKey || cols[0]?.key || '');
       setSelectedMetric1(profile.primaryMetricKey || cols.find((c) => c.type === 'numeric')?.key || '');
       setSelectedMetric2(profile.secondaryMetricKey || cols.filter((c) => c.type === 'numeric')[1]?.key || '');
     }
-  }, [profile]);
+  }, [activeDashboard, profile]);
 
   const dimensionCol = columns.find((c) => c.key === selectedDimension);
   const metric1Col = columns.find((c) => c.key === selectedMetric1);

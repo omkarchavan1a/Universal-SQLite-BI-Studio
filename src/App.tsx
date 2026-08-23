@@ -10,17 +10,22 @@ import { ThemeSelectorModal } from './components/ThemeSelectorModal';
 import { WorkbookModal } from './components/WorkbookModal';
 import { ActivityLogDrawer } from './components/ActivityLogDrawer';
 import { ShareDashboardModal } from './components/ShareDashboardModal';
+import { DashboardTabBar } from './components/DashboardTabBar';
+import { DataCheckModal } from './components/DataCheckModal';
+import { DashboardConfigModal } from './components/DashboardConfigModal';
 import { 
   DatasetProfile, 
   GenericRecord, 
   UniversalFilterState, 
-  UpdateEvent 
+  UpdateEvent,
+  DashboardConfig 
 } from './types';
 import { 
   profileDataset, 
   parseUploadedFile, 
   formatMetricValue 
 } from './utils/universalParser';
+import { getDefaultDashboards } from './utils/dashboardGenerator';
 import { sampleDatasets } from './data/sampleDatasets';
 import { exportUniversalCSV } from './utils/universalExcelEngine';
 import { 
@@ -34,10 +39,14 @@ import {
   THEMES 
 } from './themes';
 import {
+  encodeDatasetToCompressedString,
   decodeDatasetFromCompressedString,
   saveActiveCustomDataset,
   loadActiveCustomDataset,
-  clearActiveCustomDataset
+  clearActiveCustomDataset,
+  saveSharedDataset,
+  loadSharedDataset,
+  extractDataPayload
 } from './utils/datasetStorage';
 import { 
   Activity, 
@@ -55,7 +64,7 @@ import {
 } from 'lucide-react';
 
 /**
- * Resolves the initial dataset state from URL compressed hash/params, sample selector, or local storage
+ * Resolves the initial dataset state from URL compressed hash/params, share ID, or local storage
  */
 function resolveInitialDataset(): {
   records: GenericRecord[];
@@ -80,27 +89,22 @@ function resolveInitialDataset(): {
 
   const urlParams = new URLSearchParams(window.location.search);
   const hash = window.location.hash || '';
+  const fullHref = window.location.href || '';
   const isShared = 
     urlParams.get('shared') === 'true' || 
     urlParams.get('mode') === 'dashboard' || 
     urlParams.get('view') === 'dashboard' ||
-    hash.includes('data=');
+    hash.includes('data=') ||
+    fullHref.includes('data=') ||
+    !!urlParams.get('sid');
 
-  // 1. Check for URL Hash compressed payload (#data=...) or query param (?data=...)
-  let dataPayload = '';
-  if (hash.startsWith('#data=')) {
-    dataPayload = hash.substring('#data='.length);
-  } else if (hash.includes('data=')) {
-    const match = hash.match(/data=([^&]+)/);
-    if (match) dataPayload = match[1];
-  }
-  if (!dataPayload) {
-    dataPayload = urlParams.get('data') || '';
-  }
-
-  if (dataPayload) {
-    const decoded = decodeDatasetFromCompressedString(dataPayload);
+  // 1. Check for URL Hash or Query compressed payload (#data=... or ?data=...)
+  const rawPayload = extractDataPayload(hash) || extractDataPayload(urlParams.get('data') || '') || extractDataPayload(urlParams.get('payload') || '') || extractDataPayload(fullHref);
+  if (rawPayload) {
+    const decoded = decodeDatasetFromCompressedString(rawPayload);
     if (decoded && decoded.records && decoded.records.length > 0) {
+      // Save locally so refreshes persist
+      saveActiveCustomDataset(decoded.records, decoded.profile, decoded.datasetName, decoded.fileName);
       return {
         records: decoded.records,
         profile: decoded.profile,
@@ -112,9 +116,39 @@ function resolveInitialDataset(): {
     }
   }
 
-  // 2. Check for ?sample=... param (by id, name, or index)
+  // 2. Check for Shared Dataset ID (?sid=...) in shared storage cache
+  const sidParam = urlParams.get('sid');
+  if (sidParam) {
+    const sharedData = loadSharedDataset(sidParam);
+    if (sharedData && sharedData.records && sharedData.records.length > 0) {
+      saveActiveCustomDataset(sharedData.records, sharedData.profile, sharedData.datasetName, sharedData.fileName);
+      return {
+        records: sharedData.records,
+        profile: sharedData.profile,
+        datasetName: sharedData.datasetName,
+        fileName: sharedData.fileName,
+        sampleIndex: -1,
+        isShared: true,
+      };
+    }
+  }
+
+  // 3. If in Shared Mode or without sample param, check active custom uploaded dataset from storage
+  const activeCustom = loadActiveCustomDataset();
+  if (activeCustom && activeCustom.records && activeCustom.records.length > 0 && (isShared || !urlParams.get('sample'))) {
+    return {
+      records: activeCustom.records,
+      profile: activeCustom.profile,
+      datasetName: activeCustom.datasetName,
+      fileName: activeCustom.fileName,
+      sampleIndex: -1,
+      isShared: isShared,
+    };
+  }
+
+  // 4. Check for explicit ?sample=... param (by id, name, or index) ONLY if not in shared mode with custom data
   const sampleParam = urlParams.get('sample');
-  if (sampleParam) {
+  if (sampleParam && !isShared) {
     const cleanParam = sampleParam.toLowerCase().trim();
     let idx = sampleDatasets.findIndex(
       (s) => 
@@ -138,22 +172,19 @@ function resolveInitialDataset(): {
     }
   }
 
-  // 3. If not shared mode and no explicit sample requested, check for saved custom uploaded dataset in localStorage
-  if (!isShared && !sampleParam) {
-    const savedCustom = loadActiveCustomDataset();
-    if (savedCustom && savedCustom.records && savedCustom.records.length > 0) {
-      return {
-        records: savedCustom.records,
-        profile: savedCustom.profile,
-        datasetName: savedCustom.datasetName,
-        fileName: savedCustom.fileName,
-        sampleIndex: -1,
-        isShared: false,
-      };
-    }
+  // 5. Check if any active custom dataset is saved in standard mode
+  if (activeCustom && activeCustom.records && activeCustom.records.length > 0) {
+    return {
+      records: activeCustom.records,
+      profile: activeCustom.profile,
+      datasetName: activeCustom.datasetName,
+      fileName: activeCustom.fileName,
+      sampleIndex: -1,
+      isShared: false,
+    };
   }
 
-  // 4. Default fallback sample
+  // 6. Default fallback sample
   return {
     records: defaultSample.records,
     profile: profileDataset(defaultSample.records, defaultSample.name),
@@ -245,6 +276,21 @@ export default function App() {
   const [isLogDrawerOpen, setIsLogDrawerOpen] = useState<boolean>(false);
   const [notification, setNotification] = useState<{ message: string; type: 'success' | 'info' } | null>(null);
 
+  // Multi-Dashboard Management State
+  const [dashboards, setDashboards] = useState<DashboardConfig[]>(() =>
+    getDefaultDashboards(initialResolved.profile, initialResolved.records)
+  );
+  const [activeDashboardId, setActiveDashboardId] = useState<string>(() =>
+    dashboards[0]?.id || `dash_exec_${Date.now()}`
+  );
+  const [isDataCheckModalOpen, setIsDataCheckModalOpen] = useState<boolean>(false);
+  const [isDashboardConfigModalOpen, setIsDashboardConfigModalOpen] = useState<boolean>(false);
+  const [dashboardToEdit, setDashboardToEdit] = useState<DashboardConfig | null>(null);
+
+  const activeDashboard = useMemo(() => {
+    return dashboards.find((d) => d.id === activeDashboardId) || dashboards[0];
+  }, [dashboards, activeDashboardId]);
+
   // Universal Filters
   const [filters, setFilters] = useState<UniversalFilterState>(() => {
     if (typeof window === 'undefined') {
@@ -320,6 +366,9 @@ export default function App() {
     setFileName(sample.fileName);
     const newProfile = profileDataset(sample.records, sample.name);
     setProfile(newProfile);
+    const newDashboards = getDefaultDashboards(newProfile, sample.records);
+    setDashboards(newDashboards);
+    setActiveDashboardId(newDashboards[0]?.id || `dash_exec_${Date.now()}`);
     setFilters({ searchQuery: '', categoricalFilters: {}, numericRanges: {} });
     setActivePreset('All Records');
     setLastSyncTime(new Date());
@@ -347,8 +396,41 @@ export default function App() {
       setLastSyncTime(new Date());
       setUpdateCount(0);
 
+      // Auto-generate multiple tailored dashboards for this uploaded file
+      const generatedDashboards = getDefaultDashboards(parsedProfile, parsedRecords);
+      setDashboards(generatedDashboards);
+      setActiveDashboardId(generatedDashboards[0]?.id || `dash_exec_${Date.now()}`);
+
       // Save to persistent storage so refreshes don't lose the file
       saveActiveCustomDataset(parsedRecords, parsedProfile, parsedProfile.name, filename);
+
+      // Generate deterministic share ID and persist in shared cache
+      const cleanName = (parsedProfile.name || 'data').replace(/[^a-zA-Z0-9]/g, '_').toLowerCase();
+      const hash = Math.abs(
+        (parsedProfile.name + filename + parsedRecords.length + (parsedProfile.primaryMetricKey || '')).split('').reduce((a, b) => ((a << 5) - a) + b.charCodeAt(0), 0)
+      ).toString(36);
+      const generatedShareId = `${cleanName}_${hash}`;
+      saveSharedDataset(generatedShareId, parsedRecords, parsedProfile, parsedProfile.name, filename);
+
+      // Update URL without old sample parameter and set new data payload
+      if (typeof window !== 'undefined') {
+        try {
+          const currentUrl = new URL(window.location.href);
+          currentUrl.searchParams.delete('sample');
+          currentUrl.searchParams.set('view', 'dashboard');
+          currentUrl.searchParams.set('sid', generatedShareId);
+          const compressed = encodeDatasetToCompressedString(parsedRecords, parsedProfile, parsedProfile.name, filename);
+          if (compressed) {
+            currentUrl.hash = `data=${compressed}`;
+            if (compressed.length < 1800) {
+              currentUrl.searchParams.set('data', compressed);
+            }
+          }
+          window.history.replaceState({}, '', currentUrl.toString());
+        } catch {
+          // Ignore history state updates if blocked
+        }
+      }
 
       // Log event
       const newEvent: UpdateEvent = {
@@ -356,15 +438,84 @@ export default function App() {
         timestamp: new Date(),
         type: 'file_upload',
         recordId: 'FILE_UPLOAD',
-        description: `Imported "${filename}" (${parsedRecords.length} rows, ${parsedProfile.columns.length} columns detected).`,
+        description: `Imported "${filename}" (${parsedRecords.length} rows, ${parsedProfile.columns.length} columns detected). Generated ${generatedDashboards.length} dashboards.`,
       };
       setEvents((prev) => [newEvent, ...prev]);
 
-      // Switch to dashboard view
+      // Switch to dashboard view and trigger Data Check & Multi-Dashboard creation modal
       setActiveView('dashboard');
-      showNotification(`File analyzed: ${parsedProfile.columns.length} columns & data types profiled!`);
+      setIsDataCheckModalOpen(true);
+      showNotification(`File analyzed: ${parsedProfile.columns.length} columns & ${generatedDashboards.length} dashboards ready!`);
     } catch (err: any) {
       alert(`Error reading file: ${err.message || err}`);
+    }
+  };
+
+  // Multi-Dashboard Management Functions
+  const handleSelectDashboard = (id: string) => {
+    setActiveDashboardId(id);
+  };
+
+  const handleOpenCreateDashboard = () => {
+    setDashboardToEdit(null);
+    setIsDashboardConfigModalOpen(true);
+  };
+
+  const handleOpenEditDashboard = (dash: DashboardConfig) => {
+    setDashboardToEdit(dash);
+    setIsDashboardConfigModalOpen(true);
+  };
+
+  const handleSaveDashboard = (savedDash: DashboardConfig) => {
+    setDashboards((prev) => {
+      const existsIndex = prev.findIndex((d) => d.id === savedDash.id);
+      if (existsIndex !== -1) {
+        const next = [...prev];
+        next[existsIndex] = savedDash;
+        return next;
+      }
+      return [...prev, savedDash];
+    });
+    setActiveDashboardId(savedDash.id);
+    showNotification(`Dashboard "${savedDash.title}" saved.`);
+  };
+
+  const handleDuplicateDashboard = (dash: DashboardConfig) => {
+    const duplicated: DashboardConfig = {
+      ...dash,
+      id: `dash_copy_${Date.now()}`,
+      title: `${dash.title} (Copy)`,
+      createdAt: Date.now(),
+    };
+    setDashboards((prev) => [...prev, duplicated]);
+    setActiveDashboardId(duplicated.id);
+    showNotification(`Duplicated dashboard to "${duplicated.title}".`);
+  };
+
+  const handleDeleteDashboard = (id: string) => {
+    if (dashboards.length <= 1) {
+      showNotification('Cannot delete the only remaining dashboard.');
+      return;
+    }
+    setDashboards((prev) => prev.filter((d) => d.id !== id));
+    if (activeDashboardId === id) {
+      const remaining = dashboards.filter((d) => d.id !== id);
+      if (remaining.length > 0) {
+        setActiveDashboardId(remaining[0].id);
+      }
+    }
+    showNotification('Dashboard tab removed.');
+  };
+
+  const handleApplyDashboards = (chosenDashboards: DashboardConfig[], activeId?: string) => {
+    if (chosenDashboards && chosenDashboards.length > 0) {
+      setDashboards(chosenDashboards);
+      if (activeId) {
+        setActiveDashboardId(activeId);
+      } else {
+        setActiveDashboardId(chosenDashboards[0].id);
+      }
+      showNotification(`Activated ${chosenDashboards.length} dashboards.`);
     }
   };
 
@@ -573,7 +724,7 @@ export default function App() {
     showNotification(`Record ${recordId} removed.`);
   }, [profile.idKey]);
 
-  // Apply shared view from URL or "Preview Here" action
+  // Apply shared view from URL
   const handleApplySharedView = (shareUrl: string) => {
     try {
       const urlObj = new URL(shareUrl);
@@ -581,27 +732,37 @@ export default function App() {
       const hash = urlObj.hash || '';
 
       // Check for compressed data payload
-      let dataPayload = '';
-      if (hash.startsWith('#data=')) {
-        dataPayload = hash.substring('#data='.length);
-      } else if (hash.includes('data=')) {
-        const match = hash.match(/data=([^&]+)/);
-        if (match) dataPayload = match[1];
-      }
-      if (!dataPayload) {
-        dataPayload = urlParams.get('data') || '';
-      }
+      const rawPayload = extractDataPayload(hash) || extractDataPayload(urlParams.get('data') || '') || extractDataPayload(shareUrl);
+      let datasetLoaded = false;
 
-      if (dataPayload) {
-        const decoded = decodeDatasetFromCompressedString(dataPayload);
+      if (rawPayload) {
+        const decoded = decodeDatasetFromCompressedString(rawPayload);
         if (decoded && decoded.records && decoded.records.length > 0) {
           setRecords(decoded.records);
           setProfile(decoded.profile);
           setDatasetName(decoded.datasetName);
           setFileName(decoded.fileName);
           setCurrentSampleIndex(-1);
+          datasetLoaded = true;
         }
-      } else {
+      }
+
+      if (!datasetLoaded) {
+        const sidParam = urlParams.get('sid');
+        if (sidParam) {
+          const sharedData = loadSharedDataset(sidParam);
+          if (sharedData && sharedData.records && sharedData.records.length > 0) {
+            setRecords(sharedData.records);
+            setProfile(sharedData.profile);
+            setDatasetName(sharedData.datasetName);
+            setFileName(sharedData.fileName);
+            setCurrentSampleIndex(-1);
+            datasetLoaded = true;
+          }
+        }
+      }
+
+      if (!datasetLoaded) {
         const sampleParam = urlParams.get('sample');
         if (sampleParam) {
           const cleanParam = sampleParam.toLowerCase().trim();
@@ -621,7 +782,19 @@ export default function App() {
             setProfile(profileDataset(sample.records, sample.name));
             setDatasetName(sample.name);
             setFileName(sample.fileName);
+            datasetLoaded = true;
           }
+        }
+      }
+
+      if (!datasetLoaded) {
+        const activeCustom = loadActiveCustomDataset();
+        if (activeCustom && activeCustom.records && activeCustom.records.length > 0) {
+          setRecords(activeCustom.records);
+          setProfile(activeCustom.profile);
+          setDatasetName(activeCustom.datasetName);
+          setFileName(activeCustom.fileName);
+          setCurrentSampleIndex(-1);
         }
       }
 
@@ -808,14 +981,30 @@ export default function App() {
 
                 {/* Sync status, SQLite status & changelog button */}
                 <div className="flex items-center space-x-2.5">
+                  {/* Multi-Dashboard Generator trigger */}
+                  <button
+                    id="sub-header-multi-dashboard-btn"
+                    onClick={() => setIsDataCheckModalOpen(true)}
+                    className="inline-flex items-center space-x-1.5 text-xs font-bold px-3 py-1 rounded-full border transition cursor-pointer shadow-xs hover:opacity-90"
+                    style={{
+                      backgroundColor: theme.bgBadge,
+                      borderColor: theme.borderSubtle,
+                      color: theme.accentPrimary,
+                    }}
+                    title="Verify dataset health and generate multiple dashboards at once"
+                  >
+                    <Sparkles className="w-3.5 h-3.5" />
+                    <span>Multi-Dashboards ({dashboards.length})</span>
+                  </button>
+
                   {/* Share button quick access */}
                   <button
                     onClick={() => setIsShareModalOpen(true)}
                     className="inline-flex items-center space-x-1.5 text-xs font-bold px-3 py-1 rounded-full border transition cursor-pointer shadow-xs"
                     style={{
-                      backgroundColor: theme.bgBadge,
+                      backgroundColor: theme.bgInput,
                       borderColor: theme.borderSubtle,
-                      color: theme.accentPrimary,
+                      color: theme.textSecondary,
                     }}
                     title="Generate shareable live dashboard link"
                   >
@@ -909,6 +1098,20 @@ export default function App() {
           {/* If in Shared Mode, always render the focused Dashboard & Filters */}
           {isSharedMode ? (
             <div className="space-y-6">
+              {/* Multi-Dashboard Navigation Bar */}
+              <DashboardTabBar
+                dashboards={dashboards}
+                activeDashboardId={activeDashboardId}
+                onSelectDashboard={handleSelectDashboard}
+                onOpenCreateModal={handleOpenCreateDashboard}
+                onOpenEditModal={handleOpenEditDashboard}
+                onDuplicateDashboard={handleDuplicateDashboard}
+                onDeleteDashboard={handleDeleteDashboard}
+                onOpenDataCheckModal={() => setIsDataCheckModalOpen(true)}
+                theme={theme}
+                isSharedMode={isSharedMode}
+              />
+
               {/* KPI Cards Grid */}
               <section aria-label="Executive Key Performance Indicators">
                 <KPIGrid
@@ -918,6 +1121,7 @@ export default function App() {
                   totalCount={records.length}
                   isRealtimeActive={isRealtimeActive}
                   theme={theme}
+                  activeDashboard={activeDashboard}
                 />
               </section>
 
@@ -941,6 +1145,7 @@ export default function App() {
                   profile={profile}
                   records={filteredRecords}
                   theme={theme}
+                  activeDashboard={activeDashboard}
                 />
               </section>
             </div>
@@ -968,6 +1173,20 @@ export default function App() {
               {/* VIEW 2: VISUAL DASHBOARD */}
               {activeView === 'dashboard' && (
                 <div className="space-y-6">
+                  {/* Multi-Dashboard Navigation Bar */}
+                  <DashboardTabBar
+                    dashboards={dashboards}
+                    activeDashboardId={activeDashboardId}
+                    onSelectDashboard={handleSelectDashboard}
+                    onOpenCreateModal={handleOpenCreateDashboard}
+                    onOpenEditModal={handleOpenEditDashboard}
+                    onDuplicateDashboard={handleDuplicateDashboard}
+                    onDeleteDashboard={handleDeleteDashboard}
+                    onOpenDataCheckModal={() => setIsDataCheckModalOpen(true)}
+                    theme={theme}
+                    isSharedMode={isSharedMode}
+                  />
+
                   {/* KPI Cards Grid */}
                   <section aria-label="Executive Key Performance Indicators">
                     <KPIGrid
@@ -977,6 +1196,7 @@ export default function App() {
                       totalCount={records.length}
                       isRealtimeActive={isRealtimeActive}
                       theme={theme}
+                      activeDashboard={activeDashboard}
                     />
                   </section>
 
@@ -1000,6 +1220,7 @@ export default function App() {
                       profile={profile}
                       records={filteredRecords}
                       theme={theme}
+                      activeDashboard={activeDashboard}
                     />
                   </section>
                 </div>
@@ -1035,6 +1256,30 @@ export default function App() {
           )}
         </main>
       </div>
+
+      {/* Upload Data Verification & Multi-Dashboard Batch Generator Modal */}
+      <DataCheckModal
+        isOpen={isDataCheckModalOpen}
+        onClose={() => setIsDataCheckModalOpen(false)}
+        profile={profile}
+        records={records}
+        fileName={fileName}
+        onApplyDashboards={handleApplyDashboards}
+        theme={theme}
+      />
+
+      {/* Custom Dashboard Config / Creator Modal */}
+      <DashboardConfigModal
+        isOpen={isDashboardConfigModalOpen}
+        onClose={() => {
+          setIsDashboardConfigModalOpen(false);
+          setDashboardToEdit(null);
+        }}
+        dashboardToEdit={dashboardToEdit}
+        profile={profile}
+        onSaveDashboard={handleSaveDashboard}
+        theme={theme}
+      />
 
       {/* Share Live Dashboard Modal */}
       <ShareDashboardModal

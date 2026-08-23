@@ -16,7 +16,7 @@ import {
   Sparkles,
   Zap
 } from 'lucide-react';
-import { DatasetProfile, GenericRecord } from '../types';
+import { DatasetProfile, GenericRecord, DashboardConfig } from '../types';
 import { formatMetricValue } from '../utils/universalParser';
 import { ThemeConfig, getTheme } from '../themes';
 
@@ -27,6 +27,7 @@ interface KPIGridProps {
   totalCount?: number;
   isRealtimeActive?: boolean;
   theme?: ThemeConfig;
+  activeDashboard?: DashboardConfig;
 }
 
 const containerVariants = {
@@ -61,6 +62,7 @@ export const KPIGrid: React.FC<KPIGridProps> = ({
   totalCount: explicitTotalCount,
   isRealtimeActive = false,
   theme: propTheme,
+  activeDashboard,
 }) => {
   const theme = propTheme || getTheme('berry_noir');
   const safeRecords = Array.isArray(records) ? records : [];
@@ -69,9 +71,13 @@ export const KPIGrid: React.FC<KPIGridProps> = ({
   const filteredCount = safeFilteredRecords.length;
 
   const columns = profile?.columns || [];
-  const primaryMetricCol = columns.find((c) => c.key === profile?.primaryMetricKey);
-  const secondaryMetricCol = columns.find((c) => c.key === profile?.secondaryMetricKey);
-  const primaryDimCol = columns.find((c) => c.key === profile?.primaryDimensionKey);
+  const primaryMetricKey = activeDashboard?.metricKey1 || profile?.primaryMetricKey;
+  const secondaryMetricKey = activeDashboard?.metricKey2 || profile?.secondaryMetricKey;
+  const primaryDimKey = activeDashboard?.dimensionKey || profile?.primaryDimensionKey;
+
+  const primaryMetricCol = columns.find((c) => c.key === primaryMetricKey);
+  const secondaryMetricCol = columns.find((c) => c.key === secondaryMetricKey);
+  const primaryDimCol = columns.find((c) => c.key === primaryDimKey);
 
   // Compute live aggregates from filtered records
   let primarySum = 0;

@@ -58,6 +58,43 @@ export interface UniversalFilterState {
   dateRange?: [string, string];
 }
 
+export interface DashboardConfig {
+  id: string;
+  title: string;
+  description: string;
+  type: 'executive' | 'breakdown' | 'trends' | 'metrics' | 'operations' | 'custom';
+  icon: string;
+  dimensionKey: string;
+  secondaryDimensionKey?: string;
+  metricKey1: string;
+  metricKey2?: string;
+  chartLayout: 'all' | 'bar' | 'pie' | 'line' | 'scatter' | 'split';
+  barMode?: 'grouped' | 'stacked';
+  visibleKpis?: string[];
+  notes?: string;
+  createdAt: number;
+}
+
+export interface DatasetValidationReport {
+  rowCount: number;
+  columnCount: number;
+  totalCells: number;
+  nonNullCells: number;
+  healthScore: number;
+  cleanlinessGrade: 'A+' | 'A' | 'B' | 'C';
+  numericColumns: ColumnSchema[];
+  categoricalColumns: ColumnSchema[];
+  dateColumns: ColumnSchema[];
+  idColumns: ColumnSchema[];
+  hasDateSeries: boolean;
+  suggestedDashboards: DashboardConfig[];
+  qualityChecks: {
+    title: string;
+    status: 'pass' | 'warn' | 'info';
+    message: string;
+  }[];
+}
+
 export interface UpdateEvent {
   id: string;
   timestamp: Date;

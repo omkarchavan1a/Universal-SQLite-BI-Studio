@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect } from 'react';
 import { 
   Share2, 
   Copy, 
@@ -21,7 +21,7 @@ import {
 } from 'lucide-react';
 import { ThemeConfig, ThemeId } from '../themes';
 import { DatasetProfile, GenericRecord, UniversalFilterState } from '../types';
-import { encodeDatasetToCompressedString } from '../utils/datasetStorage';
+import { encodeDatasetToCompressedString, saveSharedDataset, saveActiveCustomDataset } from '../utils/datasetStorage';
 import { exportUniversalCSV } from '../utils/universalExcelEngine';
 
 interface ShareDashboardModalProps {
@@ -61,6 +61,23 @@ export const ShareDashboardModal: React.FC<ShareDashboardModalProps> = ({
   const [copied, setCopied] = useState<boolean>(false);
   const [copiedJson, setCopiedJson] = useState<boolean>(false);
 
+  // Deterministic share ID based on dataset metadata
+  const shareId = useMemo(() => {
+    const cleanName = (datasetName || 'data').replace(/[^a-zA-Z0-9]/g, '_').toLowerCase();
+    const hash = Math.abs(
+      (datasetName + fileName + records.length + (profile.primaryMetricKey || '')).split('').reduce((a, b) => ((a << 5) - a) + b.charCodeAt(0), 0)
+    ).toString(36);
+    return `${cleanName}_${hash}`;
+  }, [datasetName, fileName, records.length, profile.primaryMetricKey]);
+
+  // Persist dataset snapshot to shared cache whenever modal opens or data changes
+  useEffect(() => {
+    if (isOpen && records.length > 0 && profile) {
+      saveSharedDataset(shareId, records, profile, datasetName, fileName);
+      saveActiveCustomDataset(records, profile, datasetName, fileName);
+    }
+  }, [isOpen, shareId, records, profile, datasetName, fileName]);
+
   // Compute shareable URL synchronously so it is never empty or delayed
   const generatedUrl = useMemo(() => {
     if (typeof window === 'undefined') return '';
@@ -69,17 +86,23 @@ export const ShareDashboardModal: React.FC<ShareDashboardModalProps> = ({
       const url = new URL(window.location.origin + window.location.pathname);
       url.searchParams.set('shared', 'true');
       url.searchParams.set('view', 'dashboard');
+      url.searchParams.set('sid', shareId);
 
-      // CRITICAL: Always encode the exact snapshot of records, profile, datasetName, and fileName
-      // so any new rows, manual edits, custom metrics, and uploaded files are ALWAYS preserved and displayed.
+      // Embed compressed snapshot
       const compressed = encodeDatasetToCompressedString(records, profile, datasetName, fileName);
       if (compressed) {
         url.hash = `data=${compressed}`;
+        // If data payload is compact, also embed in query parameter for maximum URL compatibility
+        if (compressed.length < 1800) {
+          url.searchParams.set('data', compressed);
+        }
       }
 
-      // If sampleId is present, also keep it as fallback metadata
-      if (sampleId) {
+      // If unmodified sample dataset, provide sample param; if custom upload, ensure sample is removed
+      if (sampleId && !isCustomUpload) {
         url.searchParams.set('sample', sampleId);
+      } else {
+        url.searchParams.delete('sample');
       }
 
       if (includeTheme && themeId) {
@@ -120,7 +143,9 @@ export const ShareDashboardModal: React.FC<ShareDashboardModalProps> = ({
       return typeof window !== 'undefined' ? window.location.href : '';
     }
   }, [
+    shareId,
     sampleId, 
+    isCustomUpload,
     records, 
     profile, 
     datasetName, 
