@@ -42,15 +42,27 @@ async function getSqlJsInstance() {
       throw new Error('SQLite library (initSqlJs) could not be loaded.');
     }
 
-    sqlJsPromise = initFn({
-      locateFile: (file: string) => {
-        // Prefer locally hosted wasm binary in /public first
-        if (file.endsWith('.wasm')) {
-          return '/sql-wasm.wasm';
-        }
-        return `https://cdnjs.cloudflare.com/ajax/libs/sql.js/1.14.2/${file}`;
-      },
-    }).catch((err: any) => {
+    sqlJsPromise = (async () => {
+      try {
+        // Try local wasm first
+        return await initFn({
+          locateFile: (file: string) => {
+            if (file.endsWith('.wasm')) {
+              return '/sql-wasm.wasm';
+            }
+            return `https://cdnjs.cloudflare.com/ajax/libs/sql.js/1.14.2/${file}`;
+          },
+        });
+      } catch (localErr) {
+        console.warn('[SQLite] Local WASM init failed, attempting CDN fallback:', localErr);
+        // Fallback to CDN if local wasm has any issue
+        return await initFn({
+          locateFile: (file: string) => {
+            return `https://cdnjs.cloudflare.com/ajax/libs/sql.js/1.14.2/${file}`;
+          },
+        });
+      }
+    })().catch((err: any) => {
       // Reset promise if failed so next retry can attempt
       sqlJsPromise = null;
       throw err;

@@ -11,16 +11,24 @@ import {
   Eye,
   Sparkles,
   Link as LinkIcon,
-  Filter
+  Filter,
+  FileSpreadsheet,
+  Layers,
+  Database
 } from 'lucide-react';
 import { ThemeConfig, ThemeId } from '../themes';
-import { DatasetProfile, UniversalFilterState } from '../types';
+import { DatasetProfile, GenericRecord, UniversalFilterState } from '../types';
+import { encodeDatasetToCompressedString } from '../utils/datasetStorage';
 
 interface ShareDashboardModalProps {
   isOpen: boolean;
   onClose: () => void;
   datasetName: string;
+  fileName: string;
+  records: GenericRecord[];
+  profile: DatasetProfile;
   sampleId?: string;
+  isCustomUpload?: boolean;
   themeId: ThemeId;
   theme: ThemeConfig;
   filters: UniversalFilterState;
@@ -32,7 +40,11 @@ export const ShareDashboardModal: React.FC<ShareDashboardModalProps> = ({
   isOpen,
   onClose,
   datasetName,
+  fileName,
+  records,
+  profile,
   sampleId,
+  isCustomUpload = false,
   themeId,
   theme,
   filters,
@@ -44,16 +56,25 @@ export const ShareDashboardModal: React.FC<ShareDashboardModalProps> = ({
   const [includeRealtime, setIncludeRealtime] = useState<boolean>(true);
   const [copied, setCopied] = useState<boolean>(false);
   const [generatedUrl, setGeneratedUrl] = useState<string>('');
+  const [isGenerating, setIsGenerating] = useState<boolean>(false);
 
   useEffect(() => {
-    if (typeof window === 'undefined') return;
+    if (!isOpen || typeof window === 'undefined') return;
+
+    setIsGenerating(true);
 
     try {
       const url = new URL(window.location.origin + window.location.pathname);
       url.searchParams.set('shared', 'true');
       url.searchParams.set('view', 'dashboard');
 
-      if (sampleId) {
+      if (isCustomUpload || !sampleId) {
+        // Encode custom uploaded CSV/Excel records into compressed URL hash payload
+        const compressed = encodeDatasetToCompressedString(records, profile, datasetName, fileName);
+        if (compressed) {
+          url.hash = `data=${compressed}`;
+        }
+      } else {
         url.searchParams.set('sample', sampleId);
       }
 
@@ -77,8 +98,25 @@ export const ShareDashboardModal: React.FC<ShareDashboardModalProps> = ({
       setGeneratedUrl(url.toString());
     } catch (e) {
       setGeneratedUrl(window.location.href);
+    } finally {
+      setIsGenerating(false);
     }
-  }, [isOpen, sampleId, themeId, includeTheme, includeRealtime, isRealtimeActive, includeFilters, activePreset, filters.searchQuery]);
+  }, [
+    isOpen, 
+    sampleId, 
+    isCustomUpload, 
+    records, 
+    profile, 
+    datasetName, 
+    fileName, 
+    themeId, 
+    includeTheme, 
+    includeRealtime, 
+    isRealtimeActive, 
+    includeFilters, 
+    activePreset, 
+    filters.searchQuery
+  ]);
 
   if (!isOpen) return null;
 
@@ -88,7 +126,6 @@ export const ShareDashboardModal: React.FC<ShareDashboardModalProps> = ({
       setCopied(true);
       setTimeout(() => setCopied(false), 3000);
     } catch (err) {
-      // Fallback
       const input = document.getElementById('share-url-input') as HTMLInputElement;
       if (input) {
         input.select();
@@ -131,7 +168,7 @@ export const ShareDashboardModal: React.FC<ShareDashboardModalProps> = ({
                 Share Live Dashboard
               </h3>
               <p className="text-xs" style={{ color: theme.textMuted }}>
-                Recipients view the live interactive dashboard with filters & charts
+                Recipients view the exact interactive dashboard, charts & filters
               </p>
             </div>
           </div>
@@ -146,16 +183,55 @@ export const ShareDashboardModal: React.FC<ShareDashboardModalProps> = ({
         </div>
 
         {/* Content Body */}
-        <div className="p-5 space-y-4">
+        <div className="p-5 space-y-4 max-h-[80vh] overflow-y-auto">
+          {/* Active Dataset Overview Badge */}
+          <div
+            className="p-3 rounded-xl border flex items-center justify-between text-xs"
+            style={{
+              backgroundColor: theme.bgInput,
+              borderColor: theme.borderSubtle,
+            }}
+          >
+            <div className="flex items-center space-x-2.5 min-w-0">
+              <div
+                className="p-1.5 rounded-lg shrink-0"
+                style={{
+                  backgroundColor: theme.bgBadge,
+                  color: isCustomUpload ? '#10B981' : theme.accentPrimary,
+                }}
+              >
+                {isCustomUpload ? <FileSpreadsheet className="w-4 h-4" /> : <Database className="w-4 h-4" />}
+              </div>
+              <div className="min-w-0">
+                <span className="font-bold block truncate" style={{ color: theme.textPrimary }}>
+                  {datasetName}
+                </span>
+                <span className="text-[11px] font-mono block truncate" style={{ color: theme.textSecondary }}>
+                  {fileName} • {records.length} records • {profile.columns.length} columns
+                </span>
+              </div>
+            </div>
+            <span
+              className="text-[10px] font-bold px-2 py-0.5 rounded-full border shrink-0"
+              style={{
+                backgroundColor: theme.bgBadge,
+                color: isCustomUpload ? '#10B981' : theme.accentPrimary,
+                borderColor: theme.borderSubtle,
+              }}
+            >
+              {isCustomUpload ? 'Custom Upload' : 'Preloaded Sample'}
+            </span>
+          </div>
+
           {/* Share Link Preview Box */}
           <div className="space-y-1.5">
-            <label className="text-xs font-semibold block flex items-center justify-between" style={{ color: theme.textSecondary }}>
+            <label className="text-xs font-semibold flex items-center justify-between" style={{ color: theme.textSecondary }}>
               <span className="flex items-center gap-1.5">
                 <LinkIcon className="w-3.5 h-3.5" style={{ color: theme.accentPrimary }} />
                 Shareable Dashboard Link
               </span>
               <span className="text-[11px] font-normal" style={{ color: theme.accentSecondary }}>
-                Live & Filter-Enabled
+                {isCustomUpload ? 'Self-Contained Data Snapshot' : 'Live & Filter-Enabled'}
               </span>
             </label>
             <div
@@ -169,13 +245,14 @@ export const ShareDashboardModal: React.FC<ShareDashboardModalProps> = ({
                 id="share-url-input"
                 type="text"
                 readOnly
-                value={generatedUrl}
+                value={isGenerating ? 'Generating share link...' : generatedUrl}
                 className="w-full px-2.5 py-1.5 text-xs font-mono bg-transparent border-none focus:outline-none truncate"
                 style={{ color: theme.textPrimary }}
               />
               <button
                 onClick={handleCopy}
-                className="flex items-center space-x-1 px-3 py-1.5 rounded-lg text-xs font-bold text-white transition cursor-pointer shrink-0 shadow-xs"
+                disabled={isGenerating}
+                className="flex items-center space-x-1 px-3 py-1.5 rounded-lg text-xs font-bold text-white transition cursor-pointer shrink-0 shadow-xs hover:opacity-90 disabled:opacity-50"
                 style={{ background: theme.accentGradient }}
               >
                 {copied ? (
@@ -253,7 +330,7 @@ export const ShareDashboardModal: React.FC<ShareDashboardModalProps> = ({
                 <div>
                   <span className="font-semibold block" style={{ color: theme.textPrimary }}>Live Pulse Data Stream</span>
                   <span className="text-[11px]" style={{ color: theme.textMuted }}>
-                    {isRealtimeActive ? 'Real-time synchronization enabled' : 'Static snapshot'}
+                    {isRealtimeActive ? 'Real-time simulation enabled' : 'Static snapshot'}
                   </span>
                 </div>
               </div>
@@ -266,7 +343,7 @@ export const ShareDashboardModal: React.FC<ShareDashboardModalProps> = ({
             </label>
           </div>
 
-          {/* What Recipients See Banner */}
+          {/* Recipient Experience info card */}
           <div
             className="p-3 rounded-xl border flex items-start space-x-2.5 text-xs"
             style={{
@@ -277,10 +354,13 @@ export const ShareDashboardModal: React.FC<ShareDashboardModalProps> = ({
             <Eye className="w-4 h-4 shrink-0 mt-0.5" style={{ color: theme.accentPrimary }} />
             <div>
               <span className="font-bold block" style={{ color: theme.textPrimary }}>
-                Recipient Experience
+                {isCustomUpload ? 'Full Custom Data Included' : 'Live Dashboard Experience'}
               </span>
               <p className="text-[11px] mt-0.5" style={{ color: theme.textSecondary }}>
-                Recipients get a clean, presentation-ready live dashboard showcasing Executive KPIs, dynamic categorical & numeric filters, and responsive charts.
+                {isCustomUpload 
+                  ? 'Recipients receive your uploaded file schema, calculated metrics, KPIs, and all visual charts with full interactivity.'
+                  : 'Recipients get a clean, presentation-ready live dashboard showcasing Executive KPIs, dynamic categorical & numeric filters, and responsive charts.'
+                }
               </p>
             </div>
           </div>
@@ -290,7 +370,7 @@ export const ShareDashboardModal: React.FC<ShareDashboardModalProps> = ({
         <div className="p-4 border-t flex items-center justify-between" style={{ borderColor: theme.borderSubtle }}>
           <button
             onClick={handleOpenLink}
-            className="flex items-center space-x-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold border transition cursor-pointer"
+            className="flex items-center space-x-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold border transition cursor-pointer hover:opacity-80"
             style={{
               backgroundColor: theme.bgInput,
               borderColor: theme.borderSubtle,
@@ -303,7 +383,7 @@ export const ShareDashboardModal: React.FC<ShareDashboardModalProps> = ({
 
           <button
             onClick={onClose}
-            className="px-4 py-1.5 rounded-xl text-xs font-bold text-white transition cursor-pointer"
+            className="px-4 py-1.5 rounded-xl text-xs font-bold text-white transition cursor-pointer hover:opacity-90"
             style={{ background: theme.accentGradient }}
           >
             Done
@@ -313,3 +393,4 @@ export const ShareDashboardModal: React.FC<ShareDashboardModalProps> = ({
     </div>
   );
 };
+

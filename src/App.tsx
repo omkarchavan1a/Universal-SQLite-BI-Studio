@@ -33,6 +33,12 @@ import {
   getTheme, 
   THEMES 
 } from './themes';
+import {
+  decodeDatasetFromCompressedString,
+  saveActiveCustomDataset,
+  loadActiveCustomDataset,
+  clearActiveCustomDataset
+} from './utils/datasetStorage';
 import { 
   Activity, 
   FileSpreadsheet, 
@@ -48,38 +54,124 @@ import {
   BarChart3,
 } from 'lucide-react';
 
+/**
+ * Resolves the initial dataset state from URL compressed hash/params, sample selector, or local storage
+ */
+function resolveInitialDataset(): {
+  records: GenericRecord[];
+  profile: DatasetProfile;
+  datasetName: string;
+  fileName: string;
+  sampleIndex: number;
+  isShared: boolean;
+} {
+  const defaultSample = sampleDatasets[0];
+
+  if (typeof window === 'undefined') {
+    return {
+      records: defaultSample.records,
+      profile: profileDataset(defaultSample.records, defaultSample.name),
+      datasetName: defaultSample.name,
+      fileName: defaultSample.fileName,
+      sampleIndex: 0,
+      isShared: false,
+    };
+  }
+
+  const urlParams = new URLSearchParams(window.location.search);
+  const hash = window.location.hash;
+  const isShared = urlParams.get('shared') === 'true' || urlParams.get('mode') === 'dashboard';
+
+  // 1. Check for URL Hash compressed payload (#data=...) or query param (?data=...)
+  let dataPayload = '';
+  if (hash.startsWith('#data=')) {
+    dataPayload = hash.substring('#data='.length);
+  } else if (hash.includes('data=')) {
+    const match = hash.match(/data=([^&]+)/);
+    if (match) dataPayload = match[1];
+  }
+  if (!dataPayload) {
+    dataPayload = urlParams.get('data') || '';
+  }
+
+  if (dataPayload) {
+    const decoded = decodeDatasetFromCompressedString(dataPayload);
+    if (decoded && decoded.records && decoded.records.length > 0) {
+      return {
+        records: decoded.records,
+        profile: decoded.profile,
+        datasetName: decoded.datasetName,
+        fileName: decoded.fileName,
+        sampleIndex: -1,
+        isShared: true,
+      };
+    }
+  }
+
+  // 2. Check for ?sample=... param
+  const sampleParam = urlParams.get('sample');
+  if (sampleParam) {
+    const idx = sampleDatasets.findIndex(
+      (s) => s.id === sampleParam || s.name.toLowerCase() === sampleParam.toLowerCase()
+    );
+    if (idx !== -1) {
+      const sample = sampleDatasets[idx];
+      return {
+        records: sample.records,
+        profile: profileDataset(sample.records, sample.name),
+        datasetName: sample.name,
+        fileName: sample.fileName,
+        sampleIndex: idx,
+        isShared,
+      };
+    }
+  }
+
+  // 3. If not shared mode and no explicit sample requested, check for saved custom uploaded dataset in localStorage
+  if (!isShared && !sampleParam) {
+    const savedCustom = loadActiveCustomDataset();
+    if (savedCustom && savedCustom.records && savedCustom.records.length > 0) {
+      return {
+        records: savedCustom.records,
+        profile: savedCustom.profile,
+        datasetName: savedCustom.datasetName,
+        fileName: savedCustom.fileName,
+        sampleIndex: -1,
+        isShared: false,
+      };
+    }
+  }
+
+  // 4. Default fallback sample
+  return {
+    records: defaultSample.records,
+    profile: profileDataset(defaultSample.records, defaultSample.name),
+    datasetName: defaultSample.name,
+    fileName: defaultSample.fileName,
+    sampleIndex: 0,
+    isShared,
+  };
+}
+
 export default function App() {
+  const initialResolved = useMemo(() => resolveInitialDataset(), []);
+
   // 0. URL parameters detection for Shared Dashboard View
   const [isSharedMode, setIsSharedMode] = useState<boolean>(() => {
     if (typeof window === 'undefined') return false;
     const params = new URLSearchParams(window.location.search);
-    return params.get('shared') === 'true' || params.get('mode') === 'dashboard';
+    return params.get('shared') === 'true' || params.get('mode') === 'dashboard' || initialResolved.isShared;
   });
   const [isShareModalOpen, setIsShareModalOpen] = useState<boolean>(false);
 
   // 1. Dataset State
-  const [currentSampleIndex, setCurrentSampleIndex] = useState<number>(() => {
-    if (typeof window === 'undefined') return 0;
-    const params = new URLSearchParams(window.location.search);
-    const sampleParam = params.get('sample');
-    if (sampleParam) {
-      const idx = sampleDatasets.findIndex(
-        (s) => s.id === sampleParam || s.name.toLowerCase() === sampleParam.toLowerCase()
-      );
-      if (idx !== -1) return idx;
-    }
-    return 0;
-  });
-
-  const activeInitialSample = sampleDatasets[currentSampleIndex] || sampleDatasets[0];
-  const [records, setRecords] = useState<GenericRecord[]>(() => activeInitialSample.records);
-  const [datasetName, setDatasetName] = useState<string>(activeInitialSample.name);
-  const [fileName, setFileName] = useState<string>(activeInitialSample.fileName);
+  const [currentSampleIndex, setCurrentSampleIndex] = useState<number>(initialResolved.sampleIndex);
+  const [records, setRecords] = useState<GenericRecord[]>(initialResolved.records);
+  const [datasetName, setDatasetName] = useState<string>(initialResolved.datasetName);
+  const [fileName, setFileName] = useState<string>(initialResolved.fileName);
   
   // Profile state for the active dataset
-  const [profile, setProfile] = useState<DatasetProfile>(() => 
-    profileDataset(activeInitialSample.records, activeInitialSample.name)
-  );
+  const [profile, setProfile] = useState<DatasetProfile>(initialResolved.profile);
 
   // Active Main View ('schema' | 'dashboard' | 'table' | 'sqlite')
   const [activeView, setActiveView] = useState<'schema' | 'dashboard' | 'table' | 'sqlite'>('dashboard');
@@ -194,6 +286,7 @@ export default function App() {
   const handleSelectSample = (index: number) => {
     const sample = sampleDatasets[index];
     if (!sample) return;
+    clearActiveCustomDataset();
     setCurrentSampleIndex(index);
     setRecords(sample.records);
     setDatasetName(sample.name);
@@ -204,6 +297,12 @@ export default function App() {
     setActivePreset('All Records');
     setLastSyncTime(new Date());
     setUpdateCount(0);
+
+    // Clear data hash if present
+    if (typeof window !== 'undefined' && window.location.hash) {
+      window.history.replaceState({}, '', window.location.pathname + window.location.search);
+    }
+
     showNotification(`Switched to "${sample.name}" dataset (${sample.records.length} records)`);
   };
 
@@ -221,6 +320,9 @@ export default function App() {
       setLastSyncTime(new Date());
       setUpdateCount(0);
 
+      // Save to persistent storage so refreshes don't lose the file
+      saveActiveCustomDataset(parsedRecords, parsedProfile, parsedProfile.name, filename);
+
       // Log event
       const newEvent: UpdateEvent = {
         id: `EVT-${Date.now()}`,
@@ -231,7 +333,7 @@ export default function App() {
       };
       setEvents((prev) => [newEvent, ...prev]);
 
-      // Switch to dashboard or schema to review
+      // Switch to dashboard view
       setActiveView('dashboard');
       showNotification(`File analyzed: ${parsedProfile.columns.length} columns & data types profiled!`);
     } catch (err: any) {
@@ -242,6 +344,9 @@ export default function App() {
   // Update profile configuration (e.g. override primary dimension, metrics, column types)
   const handleUpdateProfile = (updatedProfile: DatasetProfile) => {
     setProfile(updatedProfile);
+    if (currentSampleIndex === -1) {
+      saveActiveCustomDataset(records, updatedProfile, datasetName, fileName);
+    }
     showNotification('Dataset schema and chart dimension mappings updated.');
   };
 
@@ -536,6 +641,22 @@ export default function App() {
                       </button>
                     );
                   })}
+
+                  {/* Active Custom Upload Indicator Badge */}
+                  {currentSampleIndex === -1 && (
+                    <span
+                      className="px-2.5 py-1 rounded-xl text-xs font-bold border flex items-center space-x-1.5 shadow-2xs"
+                      style={{
+                        backgroundColor: theme.bgBadge,
+                        borderColor: '#10B981',
+                        color: '#10B981',
+                      }}
+                      title={`Active uploaded custom dataset: ${fileName}`}
+                    >
+                      <FileSpreadsheet className="w-3.5 h-3.5" />
+                      <span>{fileName}</span>
+                    </span>
+                  )}
                 </div>
 
                 {/* Sync status, SQLite status & changelog button */}
@@ -610,8 +731,8 @@ export default function App() {
                   <span className="font-bold text-sm" style={{ color: theme.textPrimary }}>
                     {datasetName}
                   </span>
-                  <span className="text-xs opacity-75" style={{ color: theme.textSecondary }}>
-                    ({filteredRecords.length.toLocaleString()} matching records &bull; {profile.columns.length} dimensions)
+                  <span className="text-xs opacity-75 font-mono" style={{ color: theme.textSecondary }}>
+                    ({filteredRecords.length.toLocaleString()} matching records &bull; {profile.columns.length} columns)
                   </span>
                 </div>
 
@@ -619,7 +740,7 @@ export default function App() {
                   {/* Share button in shared mode */}
                   <button
                     onClick={() => setIsShareModalOpen(true)}
-                    className="inline-flex items-center space-x-1.5 text-xs font-bold px-3 py-1 rounded-xl border transition cursor-pointer"
+                    className="inline-flex items-center space-x-1.5 text-xs font-bold px-3 py-1 rounded-xl border transition cursor-pointer hover:opacity-80"
                     style={{
                       backgroundColor: theme.bgInput,
                       borderColor: theme.borderSubtle,
@@ -628,7 +749,27 @@ export default function App() {
                     title="Share this configured view"
                   >
                     <Share2 className="w-3.5 h-3.5" />
-                    <span>Share This View</span>
+                    <span>Share Link</span>
+                  </button>
+
+                  {/* Switch to Full Studio Mode */}
+                  <button
+                    onClick={() => {
+                      setIsSharedMode(false);
+                      const currentUrl = new URL(window.location.href);
+                      currentUrl.searchParams.delete('shared');
+                      currentUrl.searchParams.delete('mode');
+                      window.history.replaceState({}, '', currentUrl.toString());
+                      showNotification('Unlocked Full Studio Workbench: SQL console, schema editor, and file upload enabled.');
+                    }}
+                    className="inline-flex items-center space-x-1.5 text-xs font-bold px-3 py-1 rounded-xl border transition cursor-pointer text-white shadow-xs hover:opacity-90"
+                    style={{
+                      background: theme.accentGradient,
+                    }}
+                    title="Open full studio workbench mode"
+                  >
+                    <Sparkles className="w-3.5 h-3.5" />
+                    <span>Open Studio Workbench</span>
                   </button>
                 </div>
               </div>
@@ -773,7 +914,11 @@ export default function App() {
         isOpen={isShareModalOpen}
         onClose={() => setIsShareModalOpen(false)}
         datasetName={datasetName}
-        sampleId={sampleDatasets[currentSampleIndex]?.id}
+        fileName={fileName}
+        records={records}
+        profile={profile}
+        sampleId={currentSampleIndex >= 0 ? sampleDatasets[currentSampleIndex]?.id : undefined}
+        isCustomUpload={currentSampleIndex === -1}
         themeId={currentThemeId}
         theme={theme}
         filters={filters}
